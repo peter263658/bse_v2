@@ -1,0 +1,55 @@
+BCCTN/
+├── config/
+│   ├── config.yaml
+│   ├── model.yaml
+│   ├── training.yaml
+│   └── dataset/
+│       └── speech_dataset.yaml
+├── Dataset/
+│   ├── VCTK/
+│   │   ├── clean_trainset/
+│   │   ├── clean_valset/
+│   │   ├── clean_testset/
+│   │   ├── noisy_trainset/
+│   │   ├── noisy_valset/
+│   │   └── noisy_testset/
+│   └── TIMIT/
+│       ├── clean_testset/
+│       └── noisy_testset/
+│           ├── snr_-6dB/
+│           ├── snr_-3dB/
+│           ├── snr_0dB/
+│           ├── snr_3dB/
+│           ├── snr_6dB/
+│           ├── snr_9dB/
+│           ├── snr_12dB/
+│           └── snr_15dB/
+├── DCNN/
+│   ├── datasets/
+│   │   ├── base_dataset.py
+│   │   └── test_dataset.py
+│   ├── feature_extractors.py
+│   ├── loss.py
+│   ├── models/
+│   │   ├── model.py
+│   │   └── binaural_attention_model.py
+│   ├── trainer.py
+│   └── utils/
+│       ├── apply_mask.py
+│       ├── base_trainer.py
+│       ├── load_config.py
+│       ├── model_utilities.py
+│       └── show.py
+├── MBSTOI/
+│   ├── mbstoi.py
+│   ├── ec.py
+│   ├── remove_silent_frames.py
+│   ├── stft.py
+│   └── thirdoct.py
+├── train.py
+├── evaluate.py
+├── prepare_data.py
+├── run_eval.sh
+├── run_dataset.sh
+├── run_train.sh
+└── requirements.txt

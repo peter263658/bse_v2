@@ -1,0 +1,62 @@
+# dataset:
+#   noisy_test_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/noisy_testset_1f
+#   noisy_training_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/noisy_trainset_1f
+#   noisy_validation_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/noisy_valset_1f
+#   target_test_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/clean_testset_1f
+#   target_training_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/clean_trainset_1f
+#   target_validation_dataset_dir: /Users/vtokala/Documents/Research/di_nn/Dataset/clean_valset_1f
+# defaults:
+# - model
+# - training
+# - dataset: speech_dataset
+# model:
+#   attention: true
+#   ild_weight: 1
+#   ipd_weight: 10
+#   snr_loss_weight: 1
+#   stoi_weight: 10
+# training:
+#   accelerator: cpu
+#   batch_size: 20
+#   learning_rate: 0.0001
+#   n_epochs: 20
+#   n_workers: 4
+#   pin_memory: true
+#   strategy: ddp_spawn
+#   train_checkpoint_path: null
+dataset:
+  noisy_test_dataset_dir: ./Dataset/noisy_testset
+  noisy_test_timit_dataset_dir: ./Dataset/noisy_testset_timit
+  noisy_training_dataset_dir: ./Dataset/noisy_trainset
+  noisy_validation_dataset_dir: ./Dataset/noisy_valset
+  target_test_dataset_dir: ./Dataset/clean_testset
+  target_test_timit_dataset_dir: ./Dataset/clean_testset_timit
+  target_training_dataset_dir: ./Dataset/clean_trainset
+  target_validation_dataset_dir: ./Dataset/clean_valset
+defaults:
+- model
+- training
+- dataset: speech_dataset
+model:
+  attention: true
+  binaural: true
+  ild_weight: 1
+  ipd_weight: 10
+  snr_loss_weight: 1
+  stoi_weight: 10
+training:
+  accelerator: auto
+  batch_size: 8
+  learning_rate: 0.001
+  learning_rate_decay_steps: [3, 8]
+  learning_rate_decay_values: 0.5
+  n_epochs: 100
+  n_workers: 4
+  pin_memory: true
+  strategy: auto
+  train_checkpoint_path: null
+  early_stopping:
+    enabled: True
+    key_to_monitor: validation_loss
+    min_delta: 0.01
+    patience_in_epochs: 3
