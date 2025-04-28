@@ -16,6 +16,42 @@ from hydra.core.global_hydra import GlobalHydra
 from DCNN.datasets.test_dataset import BaseDataset
 from DCNN.trainer import DCNNLightningModule
 
+
+def fwsegsnr(clean, noisy, enh, sr=16_000):
+    frame = 400          # 25 ms
+    hop   = 100          # 6.25 ms
+    win   = np.hanning(frame)
+
+    def _frames(x):
+        idx = np.arange(frame)[None, :] + hop*np.arange((len(x)-frame)//hop+1)[:, None]
+        return x[idx] * win
+
+    C, N, E = _frames(clean), _frames(noisy-clean), _frames(enh-clean)
+    C, N, E = np.fft.rfft(C, 512), np.fft.rfft(N, 512), np.fft.rfft(E, 512)
+
+    # 23 band權重（Zwicker critical bands，與 VOICEBOX 相同）
+    W = np.array([.13,.26,.42,.60,.78,.93,1,.97,.89,.76,.62,.50,
+                  .38,.28,.22,.18,.14,.11,.09,.07,.06,.05,.04])
+    # 每 band 對應 FFT bin 範圍（16 kHz→512 FFT）
+    edges = np.r_[0,100,200,300,400,510,630,770,920,1080,1270,1480,
+                  1720,2000,2320,2700,3150,3700,4400,5300,6400,7700,
+                  9500,12000] * 512/sr
+
+    def _band_pow(X):
+        P = np.zeros((X.shape[0], 23))
+        for b in range(23):
+            lo, hi = int(edges[b]), int(edges[b+1])
+            P[:, b] = np.sum(np.abs(X[:, lo:hi])**2, axis=1)
+        return (P * W).sum(1) + 1e-10
+
+    snr_n = 10*np.log10(_band_pow(C) / _band_pow(N))
+    snr_e = 10*np.log10(_band_pow(C) / _band_pow(E))
+    snr_n = np.clip(snr_n, -10, 35)
+    snr_e = np.clip(snr_e, -10, 35)
+    return snr_e.mean() - snr_n.mean()
+
+
+
 def compute_fw_segsnr(clean, noisy, enhanced, sr=16000):
     """
     Compute frequency-weighted Segmental SNR improvement following VOICEBOX implementation
@@ -864,8 +900,10 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
         # Calculate metrics
         try:
             # Calculate fw-SegSNR for left and right channels
-            segSNR_L = compute_fw_segsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
-            segSNR_R = compute_fw_segsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
+            # segSNR_L = compute_fw_segsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
+            # segSNR_R = compute_fw_segsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
+            segSNR_L = fwsegsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
+            segSNR_R = fwsegsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
             
             # Calculate MBSTOI
             mbstoi_score = compute_mbstoi(

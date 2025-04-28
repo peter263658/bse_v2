@@ -504,7 +504,7 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
                 # Save noisy binaural speech
                 noisy_filename = f"{file_path.stem}_az{azimuth}_snr{target_snr:.1f}.wav"
                 noisy_output_path = os.path.join(noisy_output_dir, noisy_filename)
-                sf.write(noisy_output_path, noisy_speech.T, target_sr)
+                sf.write(noisy_output_path, noisy_speech.T, target_sr)  
                 
                 # Print progress occasionally
                 if (i + 1) % 100 == 0:
