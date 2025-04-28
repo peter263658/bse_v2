@@ -22,33 +22,50 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
         hrirs_dict: Dictionary with azimuths as keys and HRIR arrays as values
     """
     hrirs_dict = {}
+    print(f"Loading HRIRs from {hrir_path} with format {format}")
     
     if format == 'wav':
         # Load from directory of wav files
         for file_path in Path(hrir_path).glob('*.wav'):
             file_name = file_path.stem
             # Parse azimuth from filename (adjust based on your file naming convention)
-            # Example: hrir_az_-90.wav for azimuth -90 degrees
             if 'az' in file_name:
                 try:
-                    az = int(file_name.split('_')[-1])
+                    # Extract azimuth from the filename
+                    # Format: anechoic_distcm_<distance>_el_<elevation>_az_<azimuth>.wav
+                    az_part = file_name.split('_az_')[-1]
+                    az = int(az_part)
+                    
+                    # Load the audio file with all channels
                     audio, sr = librosa.load(file_path, sr=None, mono=False)
                     
                     # Check if resampling is needed
                     if sr != target_sr:
                         print(f"Resampling HRIR from {sr} Hz to {target_sr} Hz")
                         # Resample if needed
-                        if audio.ndim > 1:  # Stereo
-                            audio = np.array([librosa.resample(audio[0], orig_sr=sr, target_sr=target_sr),
-                                             librosa.resample(audio[1], orig_sr=sr, target_sr=target_sr)])
-                        else:  # Mono
-                            audio = librosa.resample(audio, orig_sr=sr, target_sr=target_sr)
+                        resampled_audio = np.zeros((audio.shape[0], int(audio.shape[1] * target_sr / sr)))
+                        for ch in range(audio.shape[0]):
+                            resampled_audio[ch] = librosa.resample(audio[ch], orig_sr=sr, target_sr=target_sr)
+                        audio = resampled_audio
                     
-                    if audio.ndim == 1:  # Handle mono files
-                        print(f"Warning: {file_name} is mono, expected stereo")
-                        continue
+                    # According to docs, first two channels are left and right in-ear IRs
+                    if audio.shape[0] >= 2:
+                        # Take only the first two channels (left and right in-ear)
+                        # Channel 0 is already left ear, channel 1 is already right ear
+                        hrir = audio[:2]
+                        hrirs_dict[az] = hrir
                         
-                    hrirs_dict[az] = audio
+                        # Log the first few
+                        if len(hrirs_dict) <= 3:
+                            print(f"Loaded HRIR for azimuth {az}°, shape: {hrir.shape}")
+                            # Calculate and print average magnitude ratio (ILD)
+                            l_energy = np.sum(hrir[0]**2)
+                            r_energy = np.sum(hrir[1]**2)
+                            ild_db = 10 * np.log10((l_energy + 1e-10) / (r_energy + 1e-10))
+                            print(f"  Average ILD: {ild_db:.2f} dB (should be positive for positive azimuths)")
+                    else:
+                        print(f"Warning: {file_name} doesn't have enough channels (found {audio.shape[0]}, expected at least 2)")
+                        
                 except Exception as e:
                     print(f"Error loading HRIR file {file_path}: {e}")
     
@@ -103,6 +120,7 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
     
     print(f"Loaded {len(hrirs_dict)} HRIR azimuth positions")
     return hrirs_dict
+
 
 def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=None):
     """
