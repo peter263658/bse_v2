@@ -17,59 +17,66 @@ from DCNN.datasets.test_dataset import BaseDataset
 from DCNN.trainer import DCNNLightningModule
 
 
-def compute_segmental_snr(clean, enhanced, sr=16000):
+def compute_segmental_snr(clean, noisy, enhanced, sr=16000):
     """
-    Compute segmental SNR for audio signals
+    Compute segmental SNR improvement between noisy and enhanced signals
     
     Args:
-        clean: Clean signal
+        clean: Clean signal (reference)
+        noisy: Noisy signal
         enhanced: Enhanced signal
         sr: Sampling rate
+    
+    Returns:
+        float: Segmental SNR improvement in dB
     """
     # Frame the signals
     frame_length = int(256 * sr / 16000)  # Adjust frame length based on sampling rate
     hop_length = int(128 * sr / 16000)    # Adjust hop length based on sampling rate
     
     clean_frames = librosa.util.frame(clean, frame_length=frame_length, hop_length=hop_length)
+    noisy_frames = librosa.util.frame(noisy, frame_length=frame_length, hop_length=hop_length)
     enhanced_frames = librosa.util.frame(enhanced, frame_length=frame_length, hop_length=hop_length)
     
     # Compute SNR for each frame
     eps = 1e-10
-    noise_frames = enhanced_frames - clean_frames
     
+    # Compute noise in noisy signal
+    noise_noisy_frames = noisy_frames - clean_frames
     signal_power = np.sum(clean_frames**2, axis=0)
-    noise_power = np.sum(noise_frames**2, axis=0) + eps
+    noise_noisy_power = np.sum(noise_noisy_frames**2, axis=0) + eps
+    snr_noisy_frames = 10 * np.log10(signal_power / noise_noisy_power)
     
-    snr_frames = 10 * np.log10(signal_power / noise_power)
+    # Compute noise in enhanced signal
+    noise_enhanced_frames = enhanced_frames - clean_frames
+    noise_enhanced_power = np.sum(noise_enhanced_frames**2, axis=0) + eps
+    snr_enhanced_frames = 10 * np.log10(signal_power / noise_enhanced_power)
     
     # Apply frequency weighting (simple approach)
-    weights = np.linspace(1, 2, len(snr_frames))  # More weight to higher frequencies
-    snr_frames = snr_frames * weights
+    weights = np.linspace(1, 2, len(snr_noisy_frames))  # More weight to higher frequencies
+    snr_noisy_frames = snr_noisy_frames * weights
+    snr_enhanced_frames = snr_enhanced_frames * weights
     
     # Clip SNR values to reasonable range
-    snr_frames = np.clip(snr_frames, -10, 35)
+    snr_noisy_frames = np.clip(snr_noisy_frames, -10, 35)
+    snr_enhanced_frames = np.clip(snr_enhanced_frames, -10, 35)
     
-    # Return mean
-    return np.mean(snr_frames)
+    # Calculate SNR improvement
+    snr_improvement = np.mean(snr_enhanced_frames) - np.mean(snr_noisy_frames)
+    
+    return snr_improvement
 
 def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
-    Compute ILD error between clean and enhanced binaural signals
-    
-    Args:
-        clean_left: Clean left channel signal
-        clean_right: Clean right channel signal
-        enhanced_left: Enhanced left channel signal
-        enhanced_right: Enhanced right channel signal
-        sr: Sampling rate
+    Compute ILD error between clean and enhanced binaural signals with improved mask
     """
-    # Adjust STFT parameters based on sampling rate to maintain the same time-frequency resolution
-    # Paper uses n_fft=512, hop_length=100, win_length=400 at 16kHz
+    # Adjust STFT parameters based on sampling rate
     sr_ratio = sr / 16000
     n_fft = int(512 * sr_ratio)
     hop_length = int(100 * sr_ratio)
     win_length = int(400 * sr_ratio)
     
+    # Compute STFTs
     clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     
@@ -81,20 +88,27 @@ def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     clean_ild = 20 * np.log10(np.abs(clean_left_stft) / (np.abs(clean_right_stft) + eps) + eps)
     enhanced_ild = 20 * np.log10(np.abs(enhanced_left_stft) / (np.abs(enhanced_right_stft) + eps) + eps)
     
-    # Create a speech activity mask based on clean signal as described in the paper
+    # Create a better speech activity mask based on both left and right clean signals
     threshold = 20  # dB below max (as specified in the paper)
-    max_energy = np.max(np.abs(clean_left_stft)**2)
-    mask = (np.abs(clean_left_stft)**2 > max_energy * 10**(-threshold/10))
+    
+    # Combine energy from both channels for more robust mask
+    combined_energy_left = np.abs(clean_left_stft)**2
+    combined_energy_right = np.abs(clean_right_stft)**2
+    combined_energy = np.maximum(combined_energy_left, combined_energy_right)
+    
+    max_energy = np.max(combined_energy)
+    mask = (combined_energy > max_energy * 10**(-threshold/10))
     
     # Compute mean absolute error in active regions
     ild_error = np.abs(clean_ild - enhanced_ild)
     ild_error_masked = ild_error * mask
     
+    # Return mean over active regions
     return np.sum(ild_error_masked) / (np.sum(mask) + eps)
 
 def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
-    Compute IPD error between clean and enhanced binaural signals
+    Compute IPD error between clean and enhanced binaural signals with improved masking
     
     Args:
         clean_left: Clean left channel signal
@@ -109,6 +123,7 @@ def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     hop_length = int(100 * sr_ratio)
     win_length = int(400 * sr_ratio)
     
+    # Compute STFTs
     clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
     
@@ -120,19 +135,39 @@ def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     clean_ipd = np.angle(clean_left_stft * np.conj(clean_right_stft))
     enhanced_ipd = np.angle(enhanced_left_stft * np.conj(enhanced_right_stft))
     
-    # Create a speech activity mask based on clean signal as described in the paper
+    # Create a better speech activity mask based on both left and right channels
     threshold = 20  # dB below max (as specified in the paper)
-    max_energy = np.max(np.abs(clean_left_stft)**2)
-    mask = (np.abs(clean_left_stft)**2 > max_energy * 10**(-threshold/10))
     
-    # Compute mean absolute error in active regions
-    ipd_error = np.abs(clean_ipd - enhanced_ipd)
-    ipd_error_masked = ipd_error * mask
+    # Combine energy from both channels for more robust mask
+    combined_energy_left = np.abs(clean_left_stft)**2
+    combined_energy_right = np.abs(clean_right_stft)**2
+    combined_energy = np.maximum(combined_energy_left, combined_energy_right)
+    
+    max_energy = np.max(combined_energy)
+    mask = (combined_energy > max_energy * 10**(-threshold/10))
+    
+    # Apply the mask only to frequency bands where IPD is meaningful
+    # IPD is less reliable at very low and very high frequencies
+    # You can adjust these frequency ranges based on your data
+    f_min = 200  # Hz
+    f_max = 8000  # Hz
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    freq_mask = np.logical_and(freqs >= f_min, freqs <= f_max)
+    freq_mask = freq_mask[:, np.newaxis]  # Reshape for broadcasting
+    combined_mask = np.logical_and(mask, freq_mask)
+    
+    # Handle phase wrapping by taking the smallest angle difference
+    ipd_error = np.abs(np.angle(np.exp(1j * (clean_ipd - enhanced_ipd))))
+    ipd_error_masked = ipd_error * combined_mask
     
     # Convert to degrees
     ipd_error_degrees = ipd_error_masked * (180 / np.pi)
     
-    return np.sum(ipd_error_degrees) / (np.sum(mask) + eps)
+    # Return mean over active regions
+    total_active_bins = np.sum(combined_mask) + eps
+    mean_ipd_error = np.sum(ipd_error_degrees) / total_active_bins
+    
+    return mean_ipd_error
 
 def compute_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
@@ -318,8 +353,8 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
         
         # Calculate metrics
         # Segmental SNR
-        segSNR_L = compute_segmental_snr(clean_np[0], enhanced_np[0], sr=file_sr)
-        segSNR_R = compute_segmental_snr(clean_np[1], enhanced_np[1], sr=file_sr)
+        segSNR_L = compute_segmental_snr(clean_np[0], noisy_np[0], enhanced_np[0], sr=file_sr)
+        segSNR_R = compute_segmental_snr(clean_np[1], noisy_np[1], enhanced_np[1], sr=file_sr)
         results['segSNR_L'].append(segSNR_L)
         results['segSNR_R'].append(segSNR_R)
         

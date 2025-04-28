@@ -1,6 +1,0 @@
-Average SegSNR (L): -9.8266
-Average SegSNR (R): -9.7798
-Average SegSNR Improvement: -9.8032
-Average MBSTOI: 0.8408
-Average ILD Error (dB): 8.2427
-Average IPD Error (degrees): 115.0026

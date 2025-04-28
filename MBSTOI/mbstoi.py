@@ -1,9 +1,9 @@
 def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
     """A Python implementation of the Modified Binaural Short-Time
     Objective Intelligibility (MBSTOI) measure as described in:
-    A. H. Andersen, J. M. de Haan, Z.-H. Tan, and J. Jensen, “Refinement
+    A. H. Andersen, J. M. de Haan, Z.-H. Tan, and J. Jensen, "Refinement
     and validation of the binaural short time objective intelligibility
-    measure for spatially diverse conditions,” Speech Communication,
+    measure for spatially diverse conditions," Speech Communication,
     vol. 102, pp. 1-13, Sep. 2018. A. H. Andersen, 10/12-2018
 
     All title, copyrights and pending patents in and to the original MATLAB
@@ -27,8 +27,13 @@ def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
     import math
     from scipy.signal import resample
 
-    import MBSTOI
-    # from clarity_core.config import CONFIG
+    # Import directly - not using MBSTOI namespace
+    from .stft import stft
+    from .thirdoct import thirdoct
+    from .remove_silent_frames import remove_silent_frames
+    from .ec import ec
+    
+    # Define CONFIG class
     class CONFIG:
         fs = 16000
 
@@ -70,7 +75,6 @@ def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
 
     # Resample signals to 10 kHz
     if fs_signal != fs:
-
         logging.debug(f"Resampling signals with sr={fs} for MBSTOI calculation.")
         # Assumes fs_signal is 44.1 kHz
         l = len(xl)
@@ -79,8 +83,8 @@ def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
         yl = resample(yl, int(l * (fs / fs_signal) + 1))
         yr = resample(yr, int(l * (fs / fs_signal) + 1))
 
-    # Remove silent frames
-    [xl, xr, yl, yr] = MBSTOI.remove_silent_frames(
+    # Remove silent frames - CHANGED FROM MBSTOI.remove_silent_frames to direct function call
+    [xl, xr, yl, yr] = remove_silent_frames(
         xl, xr, yl, yr, dyn_range, N_frame, N_frame / 2
     )
 
@@ -92,17 +96,17 @@ def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
         sii = 0
 
     # STDFT and filtering
-    # Get 1/3 octave band matrix
-    [H, cf, fids, freq_low, freq_high] = MBSTOI.thirdoct(
+    # Get 1/3 octave band matrix - CHANGED FROM MBSTOI.thirdoct to direct function call
+    [H, cf, fids, freq_low, freq_high] = thirdoct(
         fs, K, J, mn
     )  # (fs, nfft, num_bands, min_freq)
     cf = 2 * math.pi * cf  # This is now the angular frequency in radians per sec
 
-    # Apply short time DFT to signals and transpose
-    xl_hat = MBSTOI.stft(xl, N_frame, K).transpose()
-    xr_hat = MBSTOI.stft(xr, N_frame, K).transpose()
-    yl_hat = MBSTOI.stft(yl, N_frame, K).transpose()
-    yr_hat = MBSTOI.stft(yr, N_frame, K).transpose()
+    # Apply short time DFT to signals and transpose - CHANGED FROM MBSTOI.stft to direct function call
+    xl_hat = stft(xl, N_frame, K).transpose()
+    xr_hat = stft(xr, N_frame, K).transpose()
+    yl_hat = stft(yl, N_frame, K).transpose()
+    yr_hat = stft(yr, N_frame, K).transpose()
 
     # Take single sided spectrum of signals
     idx = int(K / 2 + 1)
@@ -130,7 +134,8 @@ def mbstoi(xl, xr, yl, yr, gridcoarseness=1):
     sigma_delta = np.sqrt(2) * sigma_delta_0 * (1 + (abs(taus) / tau_0))
 
     logging.info(f"Processing EC stage")
-    d, p_ec_max = MBSTOI.ec(
+    # CHANGED FROM MBSTOI.ec to direct function call
+    d, p_ec_max = ec(
         xl_hat,
         xr_hat,
         yl_hat,
