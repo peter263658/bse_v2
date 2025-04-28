@@ -68,8 +68,8 @@ class DCNN(nn.Module):
 
         self.decoder = Decoder(self.kernel_num, self.kernel_size)
 
-        show_model(self)
-        show_params(self)
+        # show_model(self)
+        # show_params(self)
         # self._flatten_parameters()
 
     def forward(self, inputs):

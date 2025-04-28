@@ -18,21 +18,9 @@ from DCNN.trainer import DCNNLightningModule
 
 
 def compute_segmental_snr(clean, noisy, enhanced, sr=16000):
-    """
-    Compute segmental SNR improvement between noisy and enhanced signals
-    
-    Args:
-        clean: Clean signal (reference)
-        noisy: Noisy signal
-        enhanced: Enhanced signal
-        sr: Sampling rate
-    
-    Returns:
-        float: Segmental SNR improvement in dB
-    """
     # Frame the signals
-    frame_length = int(256 * sr / 16000)  # Adjust frame length based on sampling rate
-    hop_length = int(128 * sr / 16000)    # Adjust hop length based on sampling rate
+    frame_length = int(256 * sr / 16000)
+    hop_length = int(128 * sr / 16000)
     
     clean_frames = librosa.util.frame(clean, frame_length=frame_length, hop_length=hop_length)
     noisy_frames = librosa.util.frame(noisy, frame_length=frame_length, hop_length=hop_length)
@@ -45,15 +33,30 @@ def compute_segmental_snr(clean, noisy, enhanced, sr=16000):
     noise_noisy_frames = noisy_frames - clean_frames
     signal_power = np.sum(clean_frames**2, axis=0)
     noise_noisy_power = np.sum(noise_noisy_frames**2, axis=0) + eps
-    snr_noisy_frames = 10 * np.log10(signal_power / noise_noisy_power)
+    
+    # Skip frames with zero signal power to avoid log(0)
+    valid_frames = signal_power > eps
+    if not np.any(valid_frames):
+        return 0.0  # Return 0 if no valid frames
+    
+    snr_noisy_frames = np.zeros_like(signal_power)
+    snr_enhanced_frames = np.zeros_like(signal_power)
+    
+    # Only calculate SNR for frames with signal power
+    snr_noisy_frames[valid_frames] = 10 * np.log10(
+        signal_power[valid_frames] / noise_noisy_power[valid_frames]
+    )
     
     # Compute noise in enhanced signal
     noise_enhanced_frames = enhanced_frames - clean_frames
     noise_enhanced_power = np.sum(noise_enhanced_frames**2, axis=0) + eps
-    snr_enhanced_frames = 10 * np.log10(signal_power / noise_enhanced_power)
+    
+    snr_enhanced_frames[valid_frames] = 10 * np.log10(
+        signal_power[valid_frames] / noise_enhanced_power[valid_frames]
+    )
     
     # Apply frequency weighting (simple approach)
-    weights = np.linspace(1, 2, len(snr_noisy_frames))  # More weight to higher frequencies
+    weights = np.linspace(1, 2, len(snr_noisy_frames))
     snr_noisy_frames = snr_noisy_frames * weights
     snr_enhanced_frames = snr_enhanced_frames * weights
     
@@ -61,8 +64,14 @@ def compute_segmental_snr(clean, noisy, enhanced, sr=16000):
     snr_noisy_frames = np.clip(snr_noisy_frames, -10, 35)
     snr_enhanced_frames = np.clip(snr_enhanced_frames, -10, 35)
     
-    # Calculate SNR improvement
-    snr_improvement = np.mean(snr_enhanced_frames) - np.mean(snr_noisy_frames)
+    # Calculate SNR improvement, using only valid frames
+    if np.sum(valid_frames) > 0:
+        snr_improvement = (
+            np.sum(snr_enhanced_frames[valid_frames]) / np.sum(valid_frames) - 
+            np.sum(snr_noisy_frames[valid_frames]) / np.sum(valid_frames)
+        )
+    else:
+        snr_improvement = 0.0
     
     return snr_improvement
 
@@ -301,6 +310,7 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nEvaluating on {device }")
     model = DCNNLightningModule(config)
     model.eval()
     
@@ -340,7 +350,7 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
             # Default to 16kHz if we can't determine
             file_sr = 16000
             
-        print(f"File sampling rate: {file_sr} Hz")
+        # print(f"File sampling rate: {file_sr} Hz")
         
         # Convert to numpy for metrics calculation
         noisy_np = noisy.cpu().numpy()[0]  # [channels, samples]
