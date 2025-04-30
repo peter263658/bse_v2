@@ -62,7 +62,7 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
                             l_energy = np.sum(hrir[0]**2)
                             r_energy = np.sum(hrir[1]**2)
                             ild_db = 10 * np.log10((l_energy + 1e-10) / (r_energy + 1e-10))
-                            print(f"  Average ILD: {ild_db:.2f} dB (should be positive for positive azimuths)")
+                            print(f"  Average ILD: {ild_db:.2f} dB (should be positive for negative azimuths)")
                     else:
                         print(f"Warning: {file_name} doesn't have enough channels (found {audio.shape[0]}, expected at least 2)")
                         
@@ -119,23 +119,71 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
             hrirs_dict[az] = np.vstack((hrir_l, hrir_r))
     
     print(f"Loaded {len(hrirs_dict)} HRIR azimuth positions")
-    return hrirs_dict
+
+    # 1) Filter to frontal plane first
+    hrirs_dict = {az: hrir for az, hrir in hrirs_dict.items() if -90 <= az <= 90}
+
+    # 2) Then validate and do channel swap if needed
+    valid_hrirs_dict = {}
+    for az, hrir in hrirs_dict.items():
+        # Check if HRIR has 2 channels
+        if hrir.shape[0] != 2:
+            print(f"Warning: HRIR for azimuth {az}° has {hrir.shape[0]} channels, expected 2. Skipping.")
+            continue
+            
+        # Check if channels have sufficient energy
+        l_energy = np.sum(hrir[0]**2)
+        r_energy = np.sum(hrir[1]**2)
+        
+        if l_energy < 1e-8 or r_energy < 1e-8:
+            print(f"Warning: HRIR for azimuth {az}° has low energy: L={l_energy}, R={r_energy}. Skipping.")
+            continue
+            
+        # Verify ILD is reasonable for this azimuth
+        ild_db = 10 * np.log10((l_energy + 1e-10) / (r_energy + 1e-10))
+        
+        # CORRECTED LOGIC:
+        # Positive azimuth (to your right) → right ear louder → ILD negative
+        # Negative azimuth (to your left) → left ear louder → ILD positive
+        expected_sign = -1 if az > 0 else (1 if az < 0 else 0)
+        actual_sign = 1 if ild_db > 0 else (-1 if ild_db < 0 else 0)
+        
+        # If azimuth is significant but ILD has wrong sign, swap channels
+        if abs(az) > 10 and expected_sign * actual_sign < 0:
+            print(f"Warning: HRIR for azimuth {az}° has unexpected ILD sign: {ild_db:.2f} dB. Swapping channels.")
+            hrir = np.array([hrir[1], hrir[0]])  # Swap channels
+            # Recalculate ILD
+            l_energy = np.sum(hrir[0]**2)
+            r_energy = np.sum(hrir[1]**2)
+            ild_db = 10 * np.log10((l_energy + 1e-10) / (r_energy + 1e-10))
+        
+        # Add to validated dictionary
+        valid_hrirs_dict[az] = hrir
+
+    print(f"Loaded and validated {len(valid_hrirs_dict)} HRIR azimuth positions")
+    return valid_hrirs_dict  # Return the validated dictionary
 
 
 def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=None):
     """
     Apply HRIR to mono signal to create binaural signal with fixed length
-    
-    Args:
-        mono_audio: Mono audio signal
-        hrir_l: Left channel HRIR
-        hrir_r: Right channel HRIR
-        target_sr: Target sampling rate (default: 16000 Hz as per paper)
-        target_length: Target length of output signal
-        
-    Returns:
-        binaural: Binaural signal [2, samples] with fixed length
     """
+    # Validation checks for HRIRs
+    assert hrir_l.ndim == 1 and hrir_r.ndim == 1, "HRIRs must be 1D arrays"
+    
+    # Check if HRIRs have sufficient energy
+    hrir_l_energy = np.sum(hrir_l**2)
+    hrir_r_energy = np.sum(hrir_r**2)
+    min_energy_threshold = 1e-8
+    
+    if hrir_l_energy < min_energy_threshold or hrir_r_energy < min_energy_threshold:
+        print(f"Warning: Low energy HRIR detected. Left: {hrir_l_energy}, Right: {hrir_r_energy}")
+        # Make sure minimum energy threshold is met
+        if hrir_l_energy < min_energy_threshold:
+            hrir_l = hrir_l + 1e-4 * np.random.randn(len(hrir_l))
+        if hrir_r_energy < min_energy_threshold:
+            hrir_r = hrir_r + 1e-4 * np.random.randn(len(hrir_r))
+    
     # Use 'same' mode for convolution to maintain input length
     binaural_l = signal.convolve(mono_audio, hrir_l, mode='same')
     binaural_r = signal.convolve(mono_audio, hrir_r, mode='same')
@@ -151,6 +199,9 @@ def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=
             # Pad if too short
             pad_width = ((0, 0), (0, target_length - binaural.shape[1]))
             binaural = np.pad(binaural, pad_width)
+    
+    # Ensure correct shape
+    assert binaural.shape[0] == 2, f"Expected 2 channels, got {binaural.shape[0]}"
     
     return binaural
 
@@ -324,7 +375,9 @@ def find_wav_files(directory, recursive=True):
     print(f"Found {len(wav_files)} WAV files in {directory}")
     return wav_files
 
-def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wav', split_ratio=[0.7, 0.15, 0.15], dataset_type='vctk'):
+def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wav',
+                   split_ratio=[0.7, 0.15, 0.15], dataset_type='vctk', 
+                   use_snr_subdirs=True):
     """
     Prepare binaural speech dataset with noise for BCCTN model
     
@@ -336,6 +389,7 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         format: Format of HRIR files ('wav' or 'mat')
         split_ratio: Train/validation/test split ratio
         dataset_type: 'vctk' for training or 'timit' for unmatched testing
+        use_snr_subdirs: Whether to use SNR-specific subdirectories for TIMIT
     """
     # Target sampling rate as specified in the paper
     target_sr = 16000
@@ -367,8 +421,8 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         for dir_path in output_dirs.values():
             os.makedirs(dir_path, exist_ok=True)
             
-        # For TIMIT test, create SNR-specific directories
-        if dataset_type == 'timit':
+        # For TIMIT test, create SNR-specific directories if needed
+        if dataset_type == 'timit' and use_snr_subdirs:
             test_snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
             for snr in test_snr_levels:
                 snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
@@ -381,41 +435,8 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         print(f"Error: No WAV files found in {clean_dir}. Cannot continue.")
         return
     
-    if dataset_type == 'vctk':
-        random.shuffle(clean_files)
-        
-        # Split into train/val/test
-        n_files = len(clean_files)
-        n_train = int(n_files * split_ratio[0])
-        n_val = int(n_files * split_ratio[1])
-        
-        train_files = clean_files[:n_train]
-        val_files = clean_files[n_train:n_train+n_val]
-        test_files = clean_files[n_train+n_val:]
-        
-        # Get all noise files
-        noise_files = find_wav_files(noise_dir)
-        
-        # Process each set (train, val, test)
-        sets = [
-            ('train', train_files, output_dirs['clean_train'], output_dirs['noisy_train'], (-7, 16)),
-            ('val', val_files, output_dirs['clean_val'], output_dirs['noisy_val'], (-6, 15)),
-            ('test', test_files, output_dirs['clean_test'], output_dirs['noisy_test'], (-6, 15))
-        ]
-    else:  # timit
-        test_files = clean_files
-        noise_files = find_wav_files(noise_dir)
-        
-        # For TIMIT, we only create test set with specific SNR levels
-        test_snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
-        sets = []
-        
-        # Create a set for each SNR level
-        for snr in test_snr_levels:
-            sets.append(
-                ('test', test_files, output_dirs['clean_test'], 
-                 os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB'), (snr, snr))
-            )
+    # Get all noise files (for both VCTK and TIMIT)
+    noise_files = find_wav_files(noise_dir)
     
     # Create a white noise file if no noise files are found
     if len(noise_files) == 0:
@@ -424,6 +445,120 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         white_noise_path = os.path.join(output_base_dir, 'white_noise.wav')
         sf.write(white_noise_path, white_noise, target_sr)
         noise_files = [Path(white_noise_path)]
+    
+    if dataset_type == 'timit':
+        print(f"Processing TIMIT dataset with consistent azimuths across SNR levels...")
+        test_snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
+        
+        # Process each file just once
+        for i, file_path in enumerate(tqdm.tqdm(clean_files)):
+            try:
+                # Load and process speech as before...
+                speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
+                
+                # Skip files that are too short (less than 0.5 seconds)
+                if len(speech) / file_sr < 0.5:
+                    print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
+                    continue
+                    
+                # Process speech as before (resample, ensure duration, etc.)
+                if file_sr != target_sr:
+                    speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
+                
+                # Ensure 2 seconds duration
+                target_len = 2 * target_sr
+                
+                # Fix for "high <= 0" error: proper handling of short audio
+                if len(speech) < target_len:
+                    speech = np.pad(speech, (0, target_len - len(speech)))
+                else:
+                    try:
+                        start = np.random.randint(0, max(1, len(speech) - target_len))
+                        speech = speech[start:start + target_len]
+                    except Exception as e:
+                        print(f"Error trimming audio: {e}. Padding instead.")
+                        speech = speech[:target_len]
+                        if len(speech) < target_len:
+                            speech = np.pad(speech, (0, target_len - len(speech)))
+                
+                # Ensure the speech has exactly the target length
+                if len(speech) != target_len:
+                    speech = speech[:target_len]
+                    if len(speech) < target_len:
+                        speech = np.pad(speech, (0, target_len - len(speech)))
+                
+                # Choose ONE random azimuth to use across all SNR levels
+                available_azimuths = [az for az in hrirs_dict.keys() if -90 <= az <= 90]
+                if not available_azimuths:
+                    available_azimuths = list(hrirs_dict.keys())
+                azimuth = random.choice(available_azimuths)
+                
+                # Extract IDs
+                speaker_id = file_path.parent.name
+                sentence_id = file_path.stem
+                base_id = f"{speaker_id}_{sentence_id}"
+                
+                # Create binaural clean speech just once
+                hrir = hrirs_dict[azimuth]
+                binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
+                                            target_sr=target_sr, target_length=target_len)
+                
+                # Save clean speech once
+                clean_filename = f"{base_id}_az{azimuth}.wav"
+                clean_output_path = os.path.join(output_dirs['clean_test'], clean_filename)
+                sf.write(clean_output_path, binaural_speech.T, target_sr)
+                
+                # For each SNR level, create a corresponding noisy version
+                for snr in test_snr_levels:
+                    # Choose noise
+                    noise_file = random.choice(noise_files)
+                    
+                    # Create noise
+                    binaural_noise = create_isotropic_noise(
+                        str(noise_file), hrirs_dict, duration=2, sr=target_sr)
+                    
+                    # Mix at this specific SNR
+                    noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, snr)
+                    
+                    # Save to appropriate directory
+                    noisy_filename = f"{base_id}_az{azimuth}_snr{snr:+.1f}.wav"
+                    
+                    if use_snr_subdirs:
+                        # Use SNR subdirectories
+                        snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
+                        noisy_output_path = os.path.join(snr_dir, noisy_filename)
+                    else:
+                        # Use flat structure
+                        noisy_output_path = os.path.join(output_dirs['noisy_test'], noisy_filename)
+                    
+                    sf.write(noisy_output_path, noisy_speech.T, target_sr)
+                
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+                continue
+        
+        # Exit after TIMIT processing
+        print("TIMIT dataset processing complete!")
+        return
+    
+    # VCTK processing only below this point
+    random.shuffle(clean_files)
+    
+    # Split into train/val/test
+    n_files = len(clean_files)
+    n_train = int(n_files * split_ratio[0])
+    n_val = int(n_files * split_ratio[1])
+    
+    train_files = clean_files[:n_train]
+    val_files = clean_files[n_train:n_train+n_val]
+    test_files = clean_files[n_train+n_val:]
+    
+    # Process each set (train, val, test)
+    sets = [
+        ('train', train_files, output_dirs['clean_train'], output_dirs['noisy_train'], (-7, 16)),
+        ('val', val_files, output_dirs['clean_val'], output_dirs['noisy_val'], (-6, 15)),
+        ('test', test_files, output_dirs['clean_test'], output_dirs['noisy_test'], (-6, 15))
+    ]
     
     for set_name, files, clean_output_dir, noisy_output_dir, snr_range in sets:
         print(f"Processing {set_name} set ({len(files)} files)...")
@@ -479,7 +614,11 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
                                              target_sr=target_sr, target_length=target_len)
                 
                 # Save clean binaural speech
-                clean_filename = f"{file_path.stem}_az{azimuth}.wav"
+                speaker_id = file_path.parent.name
+                sentence_id = file_path.stem
+                base_id = f"{speaker_id}_{sentence_id}"
+
+                clean_filename = f"{base_id}_az{azimuth}.wav"
                 clean_output_path = os.path.join(clean_output_dir, clean_filename)
                 sf.write(clean_output_path, binaural_speech.T, target_sr)
                 
@@ -502,7 +641,7 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
                 noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, target_snr)
                 
                 # Save noisy binaural speech
-                noisy_filename = f"{file_path.stem}_az{azimuth}_snr{target_snr:.1f}.wav"
+                noisy_filename = f"{base_id}_az{azimuth}_snr{target_snr:+.1f}.wav"
                 noisy_output_path = os.path.join(noisy_output_dir, noisy_filename)
                 sf.write(noisy_output_path, noisy_speech.T, target_sr)  
                 
@@ -523,6 +662,8 @@ if __name__ == "__main__":
     parser.add_argument("--hrir_format", default="wav", choices=["wav", "mat"], help="Format of HRIR files")
     parser.add_argument("--dataset_type", default="vctk", choices=["vctk", "timit"], 
                         help="Dataset type: vctk for training, timit for unmatched testing")
+    parser.add_argument("--flat_structure", action="store_true", 
+                        help="Use flat directory structure instead of SNR subdirectories for TIMIT")
     
     args = parser.parse_args()
     
@@ -532,5 +673,6 @@ if __name__ == "__main__":
         args.hrir_path,
         args.output_dir,
         format=args.hrir_format,
-        dataset_type=args.dataset_type
+        dataset_type=args.dataset_type,
+        use_snr_subdirs=not args.flat_structure
     )

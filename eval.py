@@ -788,71 +788,115 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     print(f"Found {len(clean_files)} clean files and {len(noisy_files)} noisy files")
     
     # For TIMIT, extract the filename without azimuth
+    # if is_timit:
+    #     # Extract base name before azimuth for matching
+    #     clean_dict = {}
+    #     for f in clean_files:
+    #         # Example: "si1824_az-20.wav" -> "si1824"
+    #         match = re.match(r'([^_]+)_az', f.stem)
+    #         if match:
+    #             base_name = match.group(1)
+    #             if base_name not in clean_dict:
+    #                 clean_dict[base_name] = []
+    #             clean_dict[base_name].append(f)
+        
+    #     noisy_dict = {}
+    #     for f in noisy_files:
+    #         # Example: "si1824_az-70_snr-6.0.wav" -> "si1824"
+    #         match = re.match(r'([^_]+)_az', f.stem)
+    #         if match:
+    #             base_name = match.group(1)
+    #             # Filter by SNR if specified
+    #             if specific_snr is not None:
+    #                 if f'_snr{specific_snr}' not in f.stem and f'_snr{specific_snr}.0' not in f.stem:
+    #                     continue
+    #             if base_name not in noisy_dict:
+    #                 noisy_dict[base_name] = []
+    #             noisy_dict[base_name].append(f)
+        
+    #     # Match files by base name only (ignoring azimuth)
+    #     pairs = []
+    #     for base_name in set(clean_dict.keys()) & set(noisy_dict.keys()):
+    #         # Use first clean file for each base name
+    #         clean_file = clean_dict[base_name][0]  
+    #         # Use first noisy file for each base name at the specified SNR
+    #         noisy_file = noisy_dict[base_name][0]
+    #         pairs.append((clean_file, noisy_file))
+        
+    #     print(f"Found {len(pairs)} matching clean/noisy TIMIT pairs")
+    import re
+    def get_base(stem: str):
+        return re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', stem)
+
     if is_timit:
-        # Extract base name before azimuth for matching
         clean_dict = {}
         for f in clean_files:
-            # Example: "si1824_az-20.wav" -> "si1824"
-            match = re.match(r'([^_]+)_az', f.stem)
-            if match:
-                base_name = match.group(1)
-                if base_name not in clean_dict:
-                    clean_dict[base_name] = []
-                clean_dict[base_name].append(f)
-        
+            base = get_base(f.stem)
+            clean_dict.setdefault(base, []).append(f)
+
         noisy_dict = {}
         for f in noisy_files:
-            # Example: "si1824_az-70_snr-6.0.wav" -> "si1824"
-            match = re.match(r'([^_]+)_az', f.stem)
-            if match:
-                base_name = match.group(1)
-                # Filter by SNR if specified
-                if specific_snr is not None:
-                    if f'_snr{specific_snr}' not in f.stem and f'_snr{specific_snr}.0' not in f.stem:
-                        continue
-                if base_name not in noisy_dict:
-                    noisy_dict[base_name] = []
-                noisy_dict[base_name].append(f)
-        
-        # Match files by base name only (ignoring azimuth)
+            base = get_base(f.stem)
+            # 如果加了 specific_snr，就用正則再檢查一次
+            if specific_snr is not None:
+                snr_match = re.search(r'_snr([+\-]?\d+(?:\.\d+)?)$', f.stem)
+                if not snr_match or abs(float(snr_match.group(1)) - specific_snr) > 1e-6:
+                    continue
+            noisy_dict.setdefault(base, []).append(f)
+
+        # 取每個 base 的第一筆 clean/noisy 來做 pair
         pairs = []
-        for base_name in set(clean_dict.keys()) & set(noisy_dict.keys()):
-            # Use first clean file for each base name
-            clean_file = clean_dict[base_name][0]  
-            # Use first noisy file for each base name at the specified SNR
-            noisy_file = noisy_dict[base_name][0]
-            pairs.append((clean_file, noisy_file))
-        
+        for base in clean_dict.keys() & noisy_dict.keys():
+            pairs.append((clean_dict[base][0], noisy_dict[base][0]))
         print(f"Found {len(pairs)} matching clean/noisy TIMIT pairs")
-    else:
-        # For VCTK, match by azimuth
+    # else:
+    #     # For VCTK, match by azimuth
+    #     clean_dict = {}
+    #     for f in clean_files:
+    #         # Extract speaker ID and utterance ID (e.g., "p225_072")
+    #         parts = f.stem.split('_az')
+    #         if len(parts) > 1:
+    #             base_name = parts[0]
+    #             az = parts[1].split('_')[0]  # Get azimuth value
+    #             clean_dict[(base_name, az)] = f
+        
+    #     noisy_dict = {}
+    #     for f in noisy_files:
+    #         parts = f.stem.split('_az')
+    #         if len(parts) > 1:
+    #             base_name = parts[0]
+    #             rest = parts[1].split('_')
+    #             az = rest[0]  # Get azimuth value
+                
+    #             # Filter by SNR if needed
+    #             if specific_snr is not None:
+    #                 snr_part = '_'.join(rest[1:])
+    #                 if f'snr{specific_snr}' not in snr_part and f'snr{specific_snr}.0' not in snr_part:
+    #                     continue
+                
+    #             noisy_dict[(base_name, az)] = f
+        
+    #     # Find matching files with the same base name and azimuth
+    #     pairs = [(clean_dict[k], noisy_dict[k]) for k in set(clean_dict.keys()) & set(noisy_dict.keys())]
+    #     print(f"Found {len(pairs)} matching clean/noisy VCTK pairs")
         clean_dict = {}
         for f in clean_files:
-            # Extract speaker ID and utterance ID (e.g., "p225_072")
-            parts = f.stem.split('_az')
-            if len(parts) > 1:
-                base_name = parts[0]
-                az = parts[1].split('_')[0]  # Get azimuth value
-                clean_dict[(base_name, az)] = f
-        
+            parts = re.split(r'_az-?\d+', f.stem)
+            if len(parts)>=2:
+                key = parts[0]
+                clean_dict[key] = f
+
         noisy_dict = {}
         for f in noisy_files:
-            parts = f.stem.split('_az')
-            if len(parts) > 1:
-                base_name = parts[0]
-                rest = parts[1].split('_')
-                az = rest[0]  # Get azimuth value
-                
-                # Filter by SNR if needed
-                if specific_snr is not None:
-                    snr_part = '_'.join(rest[1:])
-                    if f'snr{specific_snr}' not in snr_part and f'snr{specific_snr}.0' not in snr_part:
-                        continue
-                
-                noisy_dict[(base_name, az)] = f
-        
-        # Find matching files with the same base name and azimuth
-        pairs = [(clean_dict[k], noisy_dict[k]) for k in set(clean_dict.keys()) & set(noisy_dict.keys())]
+            # 處理 _azXX_snrYY 的情況
+            key = re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', f.stem)
+            if specific_snr is not None:
+                snr_match = re.search(r'_snr([+\-]?\d+(?:\.\d+)?)$', f.stem)
+                if not snr_match or abs(float(snr_match.group(1)) - specific_snr) > 1e-6:
+                    continue
+            noisy_dict[key] = f
+
+        pairs = [(clean_dict[k], noisy_dict[k]) for k in clean_dict.keys() & noisy_dict.keys()]
         print(f"Found {len(pairs)} matching clean/noisy VCTK pairs")
     
     if len(pairs) == 0:

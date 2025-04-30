@@ -7,17 +7,28 @@ def verify_dataset(clean_dir, noisy_dir, num_samples=3):
     from pathlib import Path
     
     # Get all clean and noisy files
-    clean_files = list(Path(clean_dir).glob('**/*.wav'))
-    noisy_files = list(Path(noisy_dir).glob('**/*.wav'))
+    # clean_files = list(Path(clean_dir).glob('**/*.wav'))
+    # noisy_files = list(Path(noisy_dir).glob('**/*.wav'))
+    clean_files = list(Path(clean_dir).rglob('*.wav'))
+    noisy_files = list(Path(noisy_dir).rglob('*.wav'))
     
     print(f"Found {len(clean_files)} clean and {len(noisy_files)} noisy files")
     
     # Create a proper matching
-    clean_dict = {f.stem.split('_az')[0]: f for f in clean_files}
+    # clean_dict = {f.stem.split('_az')[0]: f for f in clean_files}
+    # noisy_dict = {}
+    import re
+
+    def get_base(stem: str):
+        return re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', stem)
+
+    clean_dict = { get_base(f.stem): f for f in clean_files }
     noisy_dict = {}
-    
+
+
     for f in noisy_files:
-        base_name = f.stem.split('_az')[0]
+        # base_name = f.stem.split('_az')[0]
+        base_name = get_base(f.stem)
         if base_name in noisy_dict:
             print(f"Warning: Duplicate base name {base_name} in noisy files")
         noisy_dict[base_name] = f
