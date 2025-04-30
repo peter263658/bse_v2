@@ -23,6 +23,8 @@ def fwsegsnr(clean, noisy, enh, sr=16_000):
     win   = np.hanning(frame)
 
     def _frames(x):
+        if len(x) < frame:
+            x = np.pad(x, (0, frame-len(x)))
         idx = np.arange(frame)[None, :] + hop*np.arange((len(x)-frame)//hop+1)[:, None]
         return x[idx] * win
 
@@ -113,6 +115,7 @@ def compute_fw_segsnr(clean, noisy, enhanced, sr=16000):
         0, 100, 200, 300, 400, 510, 630, 770, 920, 1080, 1270, 1480, 1720,
         2000, 2320, 2700, 3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000
     ])
+    band_edges_hz = np.clip(np.round(band_edges_hz).astype(int), 0, 512//2)
     
     # Convert to FFT bin indices
     band_edges_bins = np.round(band_edges_hz * fft_size / sr).astype(int)

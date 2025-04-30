@@ -2,10 +2,10 @@
 
 # Set paths
 MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/DCNN/Checkpoints/Trained_model.ckpt"    # Path to trained model
-VCTK_TEST="/raid/R12K41024/BCCTN/Dataset/noisy_testset"                         # Path to VCTK noisy test set
-VCTK_CLEAN="/raid/R12K41024/BCCTN/Dataset/clean_testset"                        # Path to VCTK clean test set
-TIMIT_TEST="/raid/R12K41024/BCCTN/Dataset/noisy_testset_timit"                  # Path to TIMIT noisy test set
-TIMIT_CLEAN="/raid/R12K41024/BCCTN/Dataset/clean_testset_timit"                 # Path to TIMIT clean test set
+VCTK_TEST="/raid/R12K41024/BCCTN/Dataset_v1/noisy_testset"                         # Path to VCTK noisy test set
+VCTK_CLEAN="/raid/R12K41024/BCCTN/Dataset_v1/clean_testset"                        # Path to VCTK clean test set
+TIMIT_TEST="/raid/R12K41024/BCCTN/Dataset_v1/noisy_testset_timit"                  # Path to TIMIT noisy test set
+TIMIT_CLEAN="/raid/R12K41024/BCCTN/Dataset_v1/clean_testset_timit"                 # Path to TIMIT clean test set
 RESULTS_DIR="./results"                                                         # Directory to save results
 
 # Create results directory
@@ -22,8 +22,8 @@ python eval.py \
     --paper_style_eval
 
 # Run basic evaluation
-python eval.py \
-    --model_checkpoint $MODEL_CHECKPOINT \
-    --test_dataset_path $VCTK_TEST \
-    --clean_dataset_path $VCTK_CLEAN \
-    --output_dir $RESULTS_DIR/basic_eval
+# python eval.py \
+#     --model_checkpoint $MODEL_CHECKPOINT \
+#     --test_dataset_path $VCTK_TEST \
+#     --clean_dataset_path $VCTK_CLEAN \
+#     --output_dir $RESULTS_DIR/basic_eval

@@ -15,14 +15,14 @@ cp prepare_data.py prepare_data_fixed.py
 
 # Use the fixed script for processing
 
-echo "Creating VCTK dataset..."
-python prepare_data_fixed.py \
-    --clean_dir "${CLEAN_DIR_VCTK}" \
-    --noise_dir "${NOISE_DIR}" \
-    --hrir_path "${HRIR_PATH}" \
-    --output_dir "${OUTPUT_DIR}" \
-    --hrir_format wav \
-    --dataset_type vctk
+# echo "Creating VCTK dataset..."
+# python prepare_data_fixed.py \
+#     --clean_dir "${CLEAN_DIR_VCTK}" \
+#     --noise_dir "${NOISE_DIR}" \
+#     --hrir_path "${HRIR_PATH}" \
+#     --output_dir "${OUTPUT_DIR}" \
+#     --hrir_format wav \
+#     --dataset_type vctk
 
 # Create TIMIT dataset for unmatched condition testing
 echo "Creating TIMIT dataset..."
