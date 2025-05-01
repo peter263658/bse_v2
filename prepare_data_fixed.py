@@ -41,7 +41,7 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
                     
                     # Check if resampling is needed
                     if sr != target_sr:
-                        # print(f"Resampling HRIR from {sr} Hz to {target_sr} Hz")
+                        print(f"Resampling HRIR from {sr} Hz to {target_sr} Hz")
                         # Resample if needed
                         resampled_audio = np.zeros((audio.shape[0], int(audio.shape[1] * target_sr / sr)))
                         for ch in range(audio.shape[0]):
@@ -169,7 +169,7 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
     print(f"Loaded and validated {len(valid_hrirs_dict)} HRIR azimuth positions")
     return valid_hrirs_dict  # Return the validated dictionary
 
-
+    
 
 def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=None):
     """
