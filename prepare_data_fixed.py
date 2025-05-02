@@ -41,7 +41,7 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
                     
                     # Check if resampling is needed
                     if sr != target_sr:
-                        print(f"Resampling HRIR from {sr} Hz to {target_sr} Hz")
+                        # print(f"Resampling HRIR from {sr} Hz to {target_sr} Hz")
                         # Resample if needed
                         resampled_audio = np.zeros((audio.shape[0], int(audio.shape[1] * target_sr / sr)))
                         for ch in range(audio.shape[0]):
@@ -165,11 +165,15 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
         
         # Add to validated dictionary
         valid_hrirs_dict[az] = hrir
+    
+    # In load_hrir(), add this assertion at the end
+    hrir = hrir.astype(np.float32)
+    assert hrir.shape[0] == 2, f"Expected HRIR shape [2, N], got {hrir.shape}"
 
     print(f"Loaded and validated {len(valid_hrirs_dict)} HRIR azimuth positions")
     return valid_hrirs_dict  # Return the validated dictionary
 
-    
+
 
 def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=None):
     """
@@ -178,22 +182,27 @@ def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=
     # Validation checks for HRIRs
     assert hrir_l.ndim == 1 and hrir_r.ndim == 1, "HRIRs must be 1D arrays"
     
-    # Check if HRIRs have sufficient energy
-    hrir_l_energy = np.sum(hrir_l**2)
-    hrir_r_energy = np.sum(hrir_r**2)
-    min_energy_threshold = 1e-8
+    # # Use full convolution
+    # full_l = signal.convolve(mono_audio, hrir_l, mode='full')
+    # full_r = signal.convolve(mono_audio, hrir_r, mode='full')
     
-    if hrir_l_energy < min_energy_threshold or hrir_r_energy < min_energy_threshold:
-        print(f"Warning: Low energy HRIR detected. Left: {hrir_l_energy}, Right: {hrir_r_energy}")
-        # Make sure minimum energy threshold is met
-        if hrir_l_energy < min_energy_threshold:
-            hrir_l = hrir_l + 1e-4 * np.random.randn(len(hrir_l))
-        if hrir_r_energy < min_energy_threshold:
-            hrir_r = hrir_r + 1e-4 * np.random.randn(len(hrir_r))
+    # # Center crop to maintain proper timing
+    # start = len(hrir_l) // 2
+    # end = start + len(mono_audio)
     
-    # Use 'same' mode for convolution to maintain input length
-    binaural_l = signal.convolve(mono_audio, hrir_l, mode='same')
-    binaural_r = signal.convolve(mono_audio, hrir_r, mode='same')
+    # binaural_l = full_l[start:end]
+    # binaural_r = full_r[start:end]
+    full_l = signal.convolve(mono_audio, hrir_l, mode='full')
+    full_r = signal.convolve(mono_audio, hrir_r, mode='full')
+
+    binaural_l = full_l[:len(mono_audio)]       
+    binaural_r = full_r[:len(mono_audio)]
+
+    
+    # Use a common scaling factor to preserve ILD
+    scale = max(np.std(binaural_l), np.std(binaural_r)) + 1e-9
+    binaural_l = binaural_l / scale
+    binaural_r = binaural_r / scale
     
     # Stack channels
     binaural = np.vstack((binaural_l, binaural_r))
@@ -203,12 +212,8 @@ def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=
         if binaural.shape[1] > target_length:
             binaural = binaural[:, :target_length]
         elif binaural.shape[1] < target_length:
-            # Pad if too short
             pad_width = ((0, 0), (0, target_length - binaural.shape[1]))
             binaural = np.pad(binaural, pad_width)
-    
-    # Ensure correct shape
-    assert binaural.shape[0] == 2, f"Expected 2 channels, got {binaural.shape[0]}"
     
     return binaural
 
@@ -494,8 +499,13 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
                     if len(speech) < target_len:
                         speech = np.pad(speech, (0, target_len - len(speech)))
                 
-                # Choose ONE random azimuth to use across all SNR levels
-                available_azimuths = [az for az in hrirs_dict.keys() if -90 <= az <= 90]
+                # # Choose ONE random azimuth to use across all SNR levels
+                # available_azimuths = [az for az in hrirs_dict.keys() if -90 <= az <= 90]
+                # if not available_azimuths:
+                #     available_azimuths = list(hrirs_dict.keys())
+                # azimuth = random.choice(available_azimuths)
+                # For VCTK training
+                available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
                 if not available_azimuths:
                     available_azimuths = list(hrirs_dict.keys())
                 azimuth = random.choice(available_azimuths)
@@ -610,7 +620,7 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
                         speech = np.pad(speech, (0, target_len - len(speech)))
                 
                 # Choose random azimuth in frontal plane (-90° to +90°) as specified in the paper
-                available_azimuths = [az for az in hrirs_dict.keys() if -90 <= az <= 90]
+                available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
                 if not available_azimuths:
                     available_azimuths = list(hrirs_dict.keys())
                 azimuth = random.choice(available_azimuths)

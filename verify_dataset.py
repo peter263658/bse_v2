@@ -1,41 +1,42 @@
-def verify_dataset(clean_dir, noisy_dir, num_samples=3):
+import soundfile as sf
+import matplotlib.pyplot as plt
+import random
+import numpy as np
+from pathlib import Path
+
+def verify_dataset(clean_dir, noisy_dir, num_samples=3, specific_snr=None):
     """Check HRIR application and file pairing in the dataset"""
-    import soundfile as sf
-    import matplotlib.pyplot as plt
-    import random
-    import numpy as np
-    from pathlib import Path
+    import re
     
     # Get all clean and noisy files
-    # clean_files = list(Path(clean_dir).glob('**/*.wav'))
-    # noisy_files = list(Path(noisy_dir).glob('**/*.wav'))
     clean_files = list(Path(clean_dir).rglob('*.wav'))
     noisy_files = list(Path(noisy_dir).rglob('*.wav'))
     
     print(f"Found {len(clean_files)} clean and {len(noisy_files)} noisy files")
     
     # Create a proper matching
-    # clean_dict = {f.stem.split('_az')[0]: f for f in clean_files}
-    # noisy_dict = {}
-    import re
-
     def get_base(stem: str):
         return re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', stem)
 
-    clean_dict = { get_base(f.stem): f for f in clean_files }
+    clean_dict = {get_base(f.stem): f for f in clean_files}
     noisy_dict = {}
-
-
+    
+    # Filter by SNR if specified
     for f in noisy_files:
-        # base_name = f.stem.split('_az')[0]
         base_name = get_base(f.stem)
-        if base_name in noisy_dict:
-            print(f"Warning: Duplicate base name {base_name} in noisy files")
-        noisy_dict[base_name] = f
+        if specific_snr is not None:
+            if f'_snr{specific_snr}.' in f.name or f'_snr{specific_snr:.1f}.' in f.name:
+                if base_name not in noisy_dict:  # Take only first match
+                    noisy_dict[base_name] = f
+        else:
+            if base_name not in noisy_dict:  # Take only first match
+                noisy_dict[base_name] = f
     
     # Find common base names
     common_keys = set(clean_dict.keys()) & set(noisy_dict.keys())
-    print(f"Found {len(common_keys)} matching clean/noisy pairs")
+    pairs = [(clean_dict[k], noisy_dict[k]) for k in common_keys]
+    
+    print(f"Found {len(pairs)} matching clean/noisy pairs")
     
     if len(common_keys) == 0:
         print("ERROR: No matching clean/noisy files found!")
