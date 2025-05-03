@@ -106,7 +106,9 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
     
     # If no HRIRs were loaded, create simple ones
     if len(hrirs_dict) == 0:
-        print("Warning: No HRIRs loaded. Creating simple HRIR for testing.")
+        print("WARNING: No HRIRs loaded! Creating simple HRIR for testing purposes only.")
+        print("WARNING: Using simplified HRIRs will significantly affect model training quality!")
+        print("WARNING: Please ensure correct HRIR files are available before actual training.")
         # Create simple HRIR for testing
         simple_hrir_length = 128
         for az in range(-90, 91, 5):
@@ -167,14 +169,16 @@ def load_hrir(hrir_path, format='wav', target_sr=16000):
         valid_hrirs_dict[az] = hrir
     
     # In load_hrir(), add this assertion at the end
-    hrir = hrir.astype(np.float32)
-    assert hrir.shape[0] == 2, f"Expected HRIR shape [2, N], got {hrir.shape}"
+    for az, hrir in valid_hrirs_dict.items():
+        valid_hrirs_dict[az] = hrir.astype(np.float32)
+        assert hrir.shape[0] == 2, f"Expected HRIR shape [2, N], got {hrir.shape}"
 
     print(f"Loaded and validated {len(valid_hrirs_dict)} HRIR azimuth positions")
     return valid_hrirs_dict  # Return the validated dictionary
 
 
 
+# Keep this version of apply_hrir_fixed
 def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=None):
     """
     Apply HRIR to mono signal to create binaural signal with fixed length
@@ -182,27 +186,14 @@ def apply_hrir_fixed(mono_audio, hrir_l, hrir_r, target_sr=16000, target_length=
     # Validation checks for HRIRs
     assert hrir_l.ndim == 1 and hrir_r.ndim == 1, "HRIRs must be 1D arrays"
     
-    # # Use full convolution
-    # full_l = signal.convolve(mono_audio, hrir_l, mode='full')
-    # full_r = signal.convolve(mono_audio, hrir_r, mode='full')
-    
-    # # Center crop to maintain proper timing
-    # start = len(hrir_l) // 2
-    # end = start + len(mono_audio)
-    
-    # binaural_l = full_l[start:end]
-    # binaural_r = full_r[start:end]
+    # Use full convolution
     full_l = signal.convolve(mono_audio, hrir_l, mode='full')
     full_r = signal.convolve(mono_audio, hrir_r, mode='full')
 
-    binaural_l = full_l[:len(mono_audio)]       
-    binaural_r = full_r[:len(mono_audio)]
-
-    
-    # Use a common scaling factor to preserve ILD
-    scale = max(np.std(binaural_l), np.std(binaural_r)) + 1e-9
-    binaural_l = binaural_l / scale
-    binaural_r = binaural_r / scale
+    # Use peak normalization to better preserve ILD
+    peak = max(np.max(np.abs(full_l)), np.max(np.abs(full_r)), 1e-9)
+    binaural_l = full_l / peak * 0.99
+    binaural_r = full_r / peak * 0.99
     
     # Stack channels
     binaural = np.vstack((binaural_l, binaural_r))
@@ -406,6 +397,9 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
     # Target sampling rate as specified in the paper
     target_sr = 16000
     
+    # Define SNR levels as used in the paper for both VCTK and TIMIT
+    snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
+    
     # Load HRIRs
     print("Loading HRIRs...")
     hrirs_dict = load_hrir(hrir_path, format, target_sr=target_sr)
@@ -423,6 +417,12 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         
         for dir_path in output_dirs.values():
             os.makedirs(dir_path, exist_ok=True)
+            
+        # Create SNR subdirectories for VCTK test set for easier evaluation
+        if use_snr_subdirs:
+            for snr in snr_levels:
+                snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
+                os.makedirs(snr_dir, exist_ok=True)
     else:  # timit - create test dirs with SNR subdirectories
         output_dirs = {
             'clean_test': os.path.join(output_base_dir, 'clean_testset_timit'),
@@ -434,9 +434,8 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
             os.makedirs(dir_path, exist_ok=True)
             
         # For TIMIT test, create SNR-specific directories if needed
-        if dataset_type == 'timit' and use_snr_subdirs:
-            test_snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
-            for snr in test_snr_levels:
+        if use_snr_subdirs:
+            for snr in snr_levels:
                 snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
                 os.makedirs(snr_dir, exist_ok=True)
     
@@ -458,107 +457,13 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
         sf.write(white_noise_path, white_noise, target_sr)
         noise_files = [Path(white_noise_path)]
     
+    # Process TIMIT separately
     if dataset_type == 'timit':
-        print(f"Processing TIMIT dataset with consistent azimuths across SNR levels...")
-        test_snr_levels = [-6, -3, 0, 3, 6, 9, 12, 15]
-        
-        # Process each file just once
-        for i, file_path in enumerate(tqdm.tqdm(clean_files)):
-            try:
-                # Load and process speech as before...
-                speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
-                
-                # Skip files that are too short (less than 0.5 seconds)
-                if len(speech) / file_sr < 0.5:
-                    print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
-                    continue
-                    
-                # Process speech as before (resample, ensure duration, etc.)
-                if file_sr != target_sr:
-                    speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
-                
-                # Ensure 2 seconds duration
-                target_len = 2 * target_sr
-                
-                # Fix for "high <= 0" error: proper handling of short audio
-                if len(speech) < target_len:
-                    speech = np.pad(speech, (0, target_len - len(speech)))
-                else:
-                    try:
-                        start = np.random.randint(0, max(1, len(speech) - target_len))
-                        speech = speech[start:start + target_len]
-                    except Exception as e:
-                        print(f"Error trimming audio: {e}. Padding instead.")
-                        speech = speech[:target_len]
-                        if len(speech) < target_len:
-                            speech = np.pad(speech, (0, target_len - len(speech)))
-                
-                # Ensure the speech has exactly the target length
-                if len(speech) != target_len:
-                    speech = speech[:target_len]
-                    if len(speech) < target_len:
-                        speech = np.pad(speech, (0, target_len - len(speech)))
-                
-                # # Choose ONE random azimuth to use across all SNR levels
-                # available_azimuths = [az for az in hrirs_dict.keys() if -90 <= az <= 90]
-                # if not available_azimuths:
-                #     available_azimuths = list(hrirs_dict.keys())
-                # azimuth = random.choice(available_azimuths)
-                # For VCTK training
-                available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
-                if not available_azimuths:
-                    available_azimuths = list(hrirs_dict.keys())
-                azimuth = random.choice(available_azimuths)
-                
-                # Extract IDs
-                speaker_id = file_path.parent.name
-                sentence_id = file_path.stem
-                base_id = f"{speaker_id}_{sentence_id}"
-                
-                # Create binaural clean speech just once
-                hrir = hrirs_dict[azimuth]
-                binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
-                                            target_sr=target_sr, target_length=target_len)
-                
-                # Save clean speech once
-                clean_filename = f"{base_id}_az{azimuth}.wav"
-                clean_output_path = os.path.join(output_dirs['clean_test'], clean_filename)
-                sf.write(clean_output_path, binaural_speech.T, target_sr)
-                
-                # For each SNR level, create a corresponding noisy version
-                for snr in test_snr_levels:
-                    # Choose noise
-                    noise_file = random.choice(noise_files)
-                    
-                    # Create noise
-                    binaural_noise = create_isotropic_noise(
-                        str(noise_file), hrirs_dict, duration=2, sr=target_sr)
-                    
-                    # Mix at this specific SNR
-                    noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, snr)
-                    
-                    # Save to appropriate directory
-                    noisy_filename = f"{base_id}_az{azimuth}_snr{snr:+.1f}.wav"
-                    
-                    if use_snr_subdirs:
-                        # Use SNR subdirectories
-                        snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
-                        noisy_output_path = os.path.join(snr_dir, noisy_filename)
-                    else:
-                        # Use flat structure
-                        noisy_output_path = os.path.join(output_dirs['noisy_test'], noisy_filename)
-                    
-                    sf.write(noisy_output_path, noisy_speech.T, target_sr)
-                
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-                continue
-        
-        # Exit after TIMIT processing
-        print("TIMIT dataset processing complete!")
+        process_timit_dataset(clean_files, noise_files, hrirs_dict, output_dirs, 
+                              snr_levels, target_sr, use_snr_subdirs)
         return
     
-    # VCTK processing only below this point
+    # VCTK processing starts here
     random.shuffle(clean_files)
     
     # Split into train/val/test
@@ -570,117 +475,316 @@ def prepare_dataset(clean_dir, noise_dir, hrir_path, output_base_dir, format='wa
     val_files = clean_files[n_train:n_train+n_val]
     test_files = clean_files[n_train+n_val:]
     
-    # Process each set (train, val, test)
-    sets = [
-        ('train', train_files, output_dirs['clean_train'], output_dirs['noisy_train'], (-7, 16)),
-        ('val', val_files, output_dirs['clean_val'], output_dirs['noisy_val'], (-6, 15)),
-        ('test', test_files, output_dirs['clean_test'], output_dirs['noisy_test'], (-6, 15))
-    ]
+    # Process VCTK test set with fixed SNR levels (like TIMIT)
+    process_vctk_test_set(test_files, noise_files, hrirs_dict, output_dirs,
+                         snr_levels, target_sr, use_snr_subdirs)
     
-    for set_name, files, clean_output_dir, noisy_output_dir, snr_range in sets:
-        print(f"Processing {set_name} set ({len(files)} files)...")
-        
-        for i, file_path in enumerate(tqdm.tqdm(files)):
-            try:
-                # Load mono clean speech and check sampling rate
-                speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
+    # Process train and val sets with random SNRs in ranges
+    process_vctk_train_val_sets(train_files, val_files, noise_files, hrirs_dict, 
+                                output_dirs, target_sr)
+
+def process_timit_dataset(clean_files, noise_files, hrirs_dict, output_dirs, 
+                         snr_levels, target_sr, use_snr_subdirs):
+    """Process TIMIT dataset with consistent azimuths across SNR levels"""
+    
+    print(f"Processing TIMIT dataset with consistent azimuths across SNR levels...")
+    
+    for i, file_path in enumerate(tqdm.tqdm(clean_files)):
+        try:
+            # Load and process speech
+            speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
+            
+            # Skip files that are too short (less than 0.5 seconds)
+            if len(speech) / file_sr < 0.5:
+                print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
+                continue
                 
-                # Skip files that are too short (less than 0.5 seconds)
-                if len(speech) / file_sr < 0.5:
-                    print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
-                    continue
-                
-                # Resample to 16 kHz if necessary (as specified in the paper)
-                if file_sr != target_sr:
-                    speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
-                
-                # Ensure 2 seconds duration (as per paper)
-                target_len = 2 * target_sr
-                
-                # Fix for "high <= 0" error: proper handling of short audio
-                if len(speech) < target_len:
-                    # Pad short files instead of trying to trim
-                    speech = np.pad(speech, (0, target_len - len(speech)))
-                else:
-                    # Only trim if there's enough audio (fix the high <= 0 error)
-                    try:
-                        start = np.random.randint(0, max(1, len(speech) - target_len))
-                        speech = speech[start:start + target_len]
-                    except Exception as e:
-                        print(f"Error trimming audio: {e}. Padding instead.")
-                        # Fallback to just taking the beginning and padding if needed
-                        speech = speech[:target_len]
-                        if len(speech) < target_len:
-                            speech = np.pad(speech, (0, target_len - len(speech)))
-                
-                # Ensure the speech has exactly the target length
-                if len(speech) != target_len:
+            # Resample if necessary
+            if file_sr != target_sr:
+                speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
+            
+            # Ensure 2 seconds duration
+            target_len = 2 * target_sr
+            
+            # Handle short audio properly
+            if len(speech) < target_len:
+                speech = np.pad(speech, (0, target_len - len(speech)))
+            else:
+                try:
+                    start = np.random.randint(0, max(1, len(speech) - target_len))
+                    speech = speech[start:start + target_len]
+                except Exception as e:
+                    print(f"Error trimming audio: {e}. Padding instead.")
                     speech = speech[:target_len]
                     if len(speech) < target_len:
                         speech = np.pad(speech, (0, target_len - len(speech)))
-                
-                # Choose random azimuth in frontal plane (-90° to +90°) as specified in the paper
-                available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
-                if not available_azimuths:
-                    available_azimuths = list(hrirs_dict.keys())
-                azimuth = random.choice(available_azimuths)
-                
-                # Apply HRIR to create binaural clean speech
-                hrir = hrirs_dict[azimuth]
-                binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
-                                             target_sr=target_sr, target_length=target_len)
-                
-                # Save clean binaural speech
-                speaker_id = file_path.parent.name
-                sentence_id = file_path.stem
-                base_id = f"{speaker_id}_{sentence_id}"
-
-                clean_filename = f"{base_id}_az{azimuth}.wav"
-                clean_output_path = os.path.join(clean_output_dir, clean_filename)
-                sf.write(clean_output_path, binaural_speech.T, target_sr)
-                
-                # Choose random noise file
+            
+            # Ensure exact target length
+            if len(speech) != target_len:
+                speech = speech[:target_len]
+                if len(speech) < target_len:
+                    speech = np.pad(speech, (0, target_len - len(speech)))
+            
+            # Choose ONE random azimuth to use across all SNR levels
+            available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
+            if not available_azimuths:
+                available_azimuths = list(hrirs_dict.keys())
+            azimuth = random.choice(available_azimuths)
+            
+            # Extract IDs
+            speaker_id = file_path.parent.name
+            sentence_id = file_path.stem
+            base_id = f"{speaker_id}_{sentence_id}"
+            
+            # Create binaural clean speech just once
+            hrir = hrirs_dict[azimuth]
+            binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
+                                        target_sr=target_sr, target_length=target_len)
+            
+            # Save clean speech once
+            clean_filename = f"{base_id}_az{azimuth}.wav"
+            clean_output_path = os.path.join(output_dirs['clean_test'], clean_filename)
+            sf.write(clean_output_path, binaural_speech.T, target_sr)
+            
+            # For each SNR level, create a corresponding noisy version
+            for snr in snr_levels:
+                # Choose noise
                 noise_file = random.choice(noise_files)
                 
-                # Generate isotropic noise as described in the paper
+                # Create noise
                 binaural_noise = create_isotropic_noise(
                     str(noise_file), hrirs_dict, duration=2, sr=target_sr)
                 
-                # Set SNR 
-                if isinstance(snr_range, tuple) and snr_range[0] == snr_range[1]:
-                    # Fixed SNR for specific test sets (TIMIT)
-                    target_snr = snr_range[0]
+                # Mix at this specific SNR
+                noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, snr)
+                
+                # Save to appropriate directory
+                # noisy_filename = f"{base_id}_az{azimuth}_snr{snr}.wav"
+                # Always use this format:
+                noisy_filename = f"{base_id}_az{azimuth}_snr{snr:+.1f}.wav"
+                if use_snr_subdirs:
+                    # Use SNR subdirectories
+                    snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
+                    noisy_output_path = os.path.join(snr_dir, noisy_filename)
                 else:
-                    # Random SNR within range for training/validation
-                    target_snr = random.uniform(snr_range[0], snr_range[1])
+                    # Use flat structure
+                    noisy_output_path = os.path.join(output_dirs['noisy_test'], noisy_filename)
                 
-                # Mix speech and noise
-                noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, target_snr)
-                
-                # Save noisy binaural speech
-                noisy_filename = f"{base_id}_az{azimuth}_snr{target_snr:+.1f}.wav"
-                noisy_output_path = os.path.join(noisy_output_dir, noisy_filename)
-                sf.write(noisy_output_path, noisy_speech.T, target_sr)  
-                
-                # Print progress occasionally
-                if (i + 1) % 100 == 0:
-                    print(f"Processed {i + 1}/{len(files)} files")
-                
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
-                continue
+                sf.write(noisy_output_path, noisy_speech.T, target_sr)
+            
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+    
+    print("TIMIT dataset processing complete!")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare binaural speech dataset for BCCTN model")
-    parser.add_argument("--clean_dir", required=True, help="Directory containing clean speech files (VCTK/TIMIT)")
-    parser.add_argument("--noise_dir", required=True, help="Directory containing noise files (NOISEX92)")
-    parser.add_argument("--hrir_path", required=True, help="Path to HRIR files")
+def process_vctk_test_set(test_files, noise_files, hrirs_dict, output_dirs,
+                         snr_levels, target_sr, use_snr_subdirs):
+    """Process VCTK test set with fixed SNR levels for consistent evaluation"""
+    
+    print(f"Processing VCTK test set with fixed SNR levels for paper-style evaluation...")
+    
+    for i, file_path in enumerate(tqdm.tqdm(test_files)):
+        try:
+            # Load mono clean speech
+            speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
+            
+            # Skip files that are too short
+            if len(speech) / file_sr < 0.5:
+                print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
+                continue
+            
+            # Resample if necessary
+            if file_sr != target_sr:
+                speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
+            
+            # Ensure 2 seconds duration
+            target_len = 2 * target_sr
+            
+            # Handle short audio properly
+            if len(speech) < target_len:
+                speech = np.pad(speech, (0, target_len - len(speech)))
+            else:
+                try:
+                    start = np.random.randint(0, max(1, len(speech) - target_len))
+                    speech = speech[start:start + target_len]
+                except Exception as e:
+                    print(f"Error trimming audio: {e}. Padding instead.")
+                    speech = speech[:target_len]
+                    if len(speech) < target_len:
+                        speech = np.pad(speech, (0, target_len - len(speech)))
+            
+            # Ensure exact target length
+            if len(speech) != target_len:
+                speech = speech[:target_len]
+                if len(speech) < target_len:
+                    speech = np.pad(speech, (0, target_len - len(speech)))
+            
+            # Choose ONE random azimuth to use across all SNR levels
+            available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
+            if not available_azimuths:
+                available_azimuths = list(hrirs_dict.keys())
+            azimuth = random.choice(available_azimuths)
+            
+            # Extract IDs
+            speaker_id = file_path.parent.name
+            sentence_id = file_path.stem
+            base_id = f"{speaker_id}_{sentence_id}"
+            
+            # Create binaural clean speech just once
+            hrir = hrirs_dict[azimuth]
+            binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
+                                        target_sr=target_sr, target_length=target_len)
+            
+            # Save clean speech once
+            clean_filename = f"{base_id}_az{azimuth}.wav"
+            clean_output_path = os.path.join(output_dirs['clean_test'], clean_filename)
+            sf.write(clean_output_path, binaural_speech.T, target_sr)
+            
+            # For each SNR level, create a corresponding noisy version
+            for snr in snr_levels:
+                # Choose noise
+                noise_file = random.choice(noise_files)
+                
+                # Create noise
+                binaural_noise = create_isotropic_noise(
+                    str(noise_file), hrirs_dict, duration=2, sr=target_sr)
+                
+                # Mix at this specific SNR
+                noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, snr)
+                
+                # Save to appropriate directory
+                noisy_filename = f"{base_id}_az{azimuth}_snr{snr:+.1f}.wav"
+                if use_snr_subdirs:
+                    # Use SNR subdirectories
+                    snr_dir = os.path.join(output_dirs['noisy_test'], f'snr_{snr}dB')
+                    noisy_output_path = os.path.join(snr_dir, noisy_filename)
+                else:
+                    # Use flat structure
+                    noisy_output_path = os.path.join(output_dirs['noisy_test'], noisy_filename)
+                
+                sf.write(noisy_output_path, noisy_speech.T, target_sr)
+            
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+    
+    print("VCTK test set processing complete!")
+
+def process_vctk_train_val_sets(train_files, val_files, noise_files, hrirs_dict, 
+                              output_dirs, target_sr):
+    """Process VCTK train and validation sets with random SNRs"""
+    
+    print(f"Processing VCTK train and validation sets...")
+    
+    # SNR range for training/validation (-7 to 16 dB as per paper)
+    min_snr = -7
+    max_snr = 16
+    
+    # Process training files
+    process_files_with_random_snr(train_files, noise_files, hrirs_dict, 
+                                 output_dirs['clean_train'], output_dirs['noisy_train'],
+                                 min_snr, max_snr, target_sr)
+    
+    # Process validation files
+    process_files_with_random_snr(val_files, noise_files, hrirs_dict, 
+                                 output_dirs['clean_val'], output_dirs['noisy_val'],
+                                 min_snr, max_snr, target_sr)
+    
+    print("VCTK train and validation sets processing complete!")
+
+def process_files_with_random_snr(files, noise_files, hrirs_dict, clean_output_dir, 
+                                 noisy_output_dir, min_snr, max_snr, target_sr):
+    """Process a set of files with random SNRs in the given range"""
+    
+    for i, file_path in enumerate(tqdm.tqdm(files)):
+        try:
+            # Load mono clean speech
+            speech, file_sr = librosa.load(str(file_path), sr=None, mono=True)
+            
+            # Skip files that are too short (less than 0.5 seconds)
+            if len(speech) / file_sr < 0.5:
+                print(f"Skipping {file_path}: too short ({len(speech) / file_sr:.2f} seconds)")
+                continue
+                
+            # Resample if necessary
+            if file_sr != target_sr:
+                speech = librosa.resample(speech, orig_sr=file_sr, target_sr=target_sr)
+            
+            # Ensure 2 seconds duration
+            target_len = 2 * target_sr
+            
+            # Handle short audio properly
+            if len(speech) < target_len:
+                speech = np.pad(speech, (0, target_len - len(speech)))
+            else:
+                try:
+                    start = np.random.randint(0, max(1, len(speech) - target_len))
+                    speech = speech[start:start + target_len]
+                except Exception as e:
+                    print(f"Error trimming audio: {e}. Padding instead.")
+                    speech = speech[:target_len]
+                    if len(speech) < target_len:
+                        speech = np.pad(speech, (0, target_len - len(speech)))
+            
+            # Ensure exact target length
+            if len(speech) != target_len:
+                speech = speech[:target_len]
+                if len(speech) < target_len:
+                    speech = np.pad(speech, (0, target_len - len(speech)))
+            
+            # Choose random azimuth
+            available_azimuths = [az for az in hrirs_dict.keys() if -60 <= az <= 60]
+            if not available_azimuths:
+                available_azimuths = list(hrirs_dict.keys())
+            azimuth = random.choice(available_azimuths)
+            
+            # Extract IDs
+            speaker_id = file_path.parent.name
+            sentence_id = file_path.stem
+            base_id = f"{speaker_id}_{sentence_id}"
+            
+            # Create binaural clean speech
+            hrir = hrirs_dict[azimuth]
+            binaural_speech = apply_hrir_fixed(speech, hrir[0], hrir[1], 
+                                        target_sr=target_sr, target_length=target_len)
+            
+            # Save clean speech
+            clean_filename = f"{base_id}_az{azimuth}.wav"
+            clean_output_path = os.path.join(clean_output_dir, clean_filename)
+            sf.write(clean_output_path, binaural_speech.T, target_sr)
+            
+            # Choose random SNR
+            snr = round(random.uniform(min_snr, max_snr), 1)
+            
+            # Choose noise
+            noise_file = random.choice(noise_files)
+            
+            # Create noise
+            binaural_noise = create_isotropic_noise(
+                str(noise_file), hrirs_dict, duration=2, sr=target_sr)
+            
+            # Mix at this specific SNR
+            noisy_speech = mix_speech_and_noise(binaural_speech, binaural_noise, snr)
+            
+            # Save noisy speech
+            noisy_filename = f"{base_id}_az{azimuth}_snr{snr:+.1f}.wav"
+            noisy_output_path = os.path.join(noisy_output_dir, noisy_filename)
+            sf.write(noisy_output_path, noisy_speech.T, target_sr)
+            
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            continue
+
+def main():
+    parser = argparse.ArgumentParser(description="Prepare binaural speech dataset for BCCTN")
+    parser.add_argument("--clean_dir", required=True, help="Directory containing clean speech files")
+    parser.add_argument("--noise_dir", required=True, help="Directory containing noise files")
+    parser.add_argument("--hrir_path", required=True, help="Path to HRIR files or directory")
     parser.add_argument("--output_dir", required=True, help="Base directory for output")
     parser.add_argument("--hrir_format", default="wav", choices=["wav", "mat"], help="Format of HRIR files")
-    parser.add_argument("--dataset_type", default="vctk", choices=["vctk", "timit"], 
-                        help="Dataset type: vctk for training, timit for unmatched testing")
-    parser.add_argument("--flat_structure", action="store_true", 
-                        help="Use flat directory structure instead of SNR subdirectories for TIMIT")
+    parser.add_argument("--dataset_type", default="vctk", choices=["vctk", "timit"], help="Dataset type")
+    parser.add_argument("--use_snr_subdirs", default=True, type=bool, help="Use SNR-specific subdirectories")
     
     args = parser.parse_args()
     
@@ -689,7 +793,10 @@ if __name__ == "__main__":
         args.noise_dir,
         args.hrir_path,
         args.output_dir,
-        format=args.hrir_format,
+        args.hrir_format,
         dataset_type=args.dataset_type,
-        use_snr_subdirs=not args.flat_structure
+        use_snr_subdirs=args.use_snr_subdirs
     )
+
+if __name__ == "__main__":
+    main()

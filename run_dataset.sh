@@ -10,28 +10,32 @@ OUTPUT_DIR="/raid/R12K41024/BCCTN/Dataset"                              # Base p
 # Create output directory if it doesn't exist
 mkdir -p $OUTPUT_DIR
 
-# Create a copy of the script with fixes
-cp prepare_data.py prepare_data_fixed.py
+# Check if prepare_data.py exists
+if [ ! -f "prepare_data.py" ]; then
+    echo "Error: prepare_data.py not found in current directory"
+    exit 1
+fi
 
-# Create TIMIT dataset for unmatched condition testing
-echo "Creating TIMIT dataset..."
-python prepare_data_fixed.py \
-    --clean_dir "${CLEAN_DIR_TIMIT}" \
-    --noise_dir "${NOISE_DIR}" \
-    --hrir_path "${HRIR_PATH}" \
-    --output_dir "${OUTPUT_DIR}" \
-    --hrir_format wav \
-    --dataset_type timit
-
-    
+# Create VCTK dataset with SNR subdirectories
 echo "Creating VCTK dataset..."
-python prepare_data_fixed.py \
+python prepare_data.py \
     --clean_dir "${CLEAN_DIR_VCTK}" \
     --noise_dir "${NOISE_DIR}" \
     --hrir_path "${HRIR_PATH}" \
     --output_dir "${OUTPUT_DIR}" \
     --hrir_format wav \
-    --dataset_type vctk
+    --dataset_type vctk \
+    --use_snr_subdirs true
 
+# Create TIMIT dataset for unmatched condition testing with SNR subdirectories
+echo "Creating TIMIT dataset..."
+python prepare_data.py \
+    --clean_dir "${CLEAN_DIR_TIMIT}" \
+    --noise_dir "${NOISE_DIR}" \
+    --hrir_path "${HRIR_PATH}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --hrir_format wav \
+    --dataset_type timit \
+    --use_snr_subdirs true
 
 echo "Dataset preparation complete!"

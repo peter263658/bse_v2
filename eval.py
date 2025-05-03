@@ -11,6 +11,7 @@ import soundfile as sf
 from tqdm import tqdm
 from hydra import compose, initialize
 from hydra.core.global_hydra import GlobalHydra
+import re
 
 # Import custom modules
 from DCNN.datasets.test_dataset import BaseDataset
@@ -18,251 +19,100 @@ from DCNN.trainer import DCNNLightningModule
 
 
 def fwsegsnr(clean, noisy, enh, sr=16_000):
-    frame = 400          # 25 ms
-    hop   = 100          # 6.25 ms
-    win   = np.hanning(frame)
-
-    def _frames(x):
-        if len(x) < frame:
-            x = np.pad(x, (0, frame-len(x)))
-        idx = np.arange(frame)[None, :] + hop*np.arange((len(x)-frame)//hop+1)[:, None]
-        return x[idx] * win
-
-    C, N, E = _frames(clean), _frames(noisy-clean), _frames(enh-clean)
-    C, N, E = np.fft.rfft(C, 512), np.fft.rfft(N, 512), np.fft.rfft(E, 512)
-
-    # 23 band權重（Zwicker critical bands，與 VOICEBOX 相同）
-    W = np.array([.13,.26,.42,.60,.78,.93,1,.97,.89,.76,.62,.50,
-                  .38,.28,.22,.18,.14,.11,.09,.07,.06,.05,.04])
-    # 每 band 對應 FFT bin 範圍（16 kHz→512 FFT）
-    edges = np.r_[0,100,200,300,400,510,630,770,920,1080,1270,1480,
-                  1720,2000,2320,2700,3150,3700,4400,5300,6400,7700,
-                  9500,12000] * 512/sr
-
-    def _band_pow(X):
-        P = np.zeros((X.shape[0], 23))
-        for b in range(23):
-            lo, hi = int(edges[b]), int(edges[b+1])
-            P[:, b] = np.sum(np.abs(X[:, lo:hi])**2, axis=1)
-        return (P * W).sum(1) + 1e-10
-
-    snr_n = 10*np.log10(_band_pow(C) / _band_pow(N))
-    snr_e = 10*np.log10(_band_pow(C) / _band_pow(E))
-    snr_n = np.clip(snr_n, -10, 35)
-    snr_e = np.clip(snr_e, -10, 35)
-    return snr_e.mean() - snr_n.mean()
-
-
-
-def compute_fw_segsnr(clean, noisy, enhanced, sr=16000):
     """
     Compute frequency-weighted Segmental SNR improvement following VOICEBOX implementation
+    
+    Args:
+        clean: Clean reference signal
+        noisy: Noisy signal
+        enh: Enhanced signal
+        sr: Sample rate
+        
+    Returns:
+        SNR improvement in dB (positive means enhancement is better than noisy)
     """
+    # Frame parameters (25ms window, 6.25ms hop at 16kHz)
+    frame = 400          # 25 ms
+    hop = 100            # 6.25 ms
+    fft_size = 512
+    
     # Bark critical-band weights (as used in VOICEBOX)
-    BARK_W = np.array([
+    W = np.array([
         0.13, 0.26, 0.42, 0.60, 0.78, 0.93, 1.00, 0.97, 0.89,
         0.76, 0.62, 0.50, 0.38, 0.28, 0.22, 0.18, 0.14, 0.11,
         0.09, 0.07, 0.06, 0.05, 0.04
     ])
     
-    # Frame parameters (25ms window, 6.25ms hop at 16kHz)
-    frame_length = int(400 * sr / 16000)  # 25ms
-    hop_length = int(100 * sr / 16000)    # 6.25ms
-    fft_size = 512
-    
-    # Hanning window
-    window = np.hanning(frame_length)
-    
-    # Make sure signals are long enough
-    if len(clean) < frame_length or len(noisy) < frame_length or len(enhanced) < frame_length:
-        print(f"Warning: Signal too short ({len(clean)} samples) for fw-SegSNR")
-        return 0.0
-    
-    # Create frames
-    def create_frames(signal):
-        # Number of frames
-        num_frames = max(1, (len(signal) - frame_length) // hop_length + 1)
-        frames = np.zeros((num_frames, frame_length))
-        
-        for i in range(num_frames):
-            start = i * hop_length
-            if start + frame_length <= len(signal):
-                frames[i] = signal[start:start + frame_length] * window
-            else:
-                # Handle last frame if needed
-                temp = np.zeros(frame_length)
-                temp[:len(signal) - start] = signal[start:] * window[:len(signal) - start]
-                frames[i] = temp
-                
-        return frames
-    
-    # Create error signals
-    noise_noisy = noisy - clean
-    noise_enhanced = enhanced - clean
-    
-    # Create frames
-    clean_frames = create_frames(clean)
-    noise_noisy_frames = create_frames(noise_noisy)
-    noise_enhanced_frames = create_frames(noise_enhanced)
-    
-    # Apply FFT
-    clean_fft = np.fft.rfft(clean_frames, fft_size, axis=1)
-    noise_noisy_fft = np.fft.rfft(noise_noisy_frames, fft_size, axis=1)
-    noise_enhanced_fft = np.fft.rfft(noise_enhanced_frames, fft_size, axis=1)
-    
-    # Define critical band edges in Hz for 16kHz SR (adjust for other SRs)
+    # Critical band edges in Hz for 16kHz sampling rate
     band_edges_hz = np.array([
         0, 100, 200, 300, 400, 510, 630, 770, 920, 1080, 1270, 1480, 1720,
         2000, 2320, 2700, 3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000
     ])
-    band_edges_hz = np.clip(np.round(band_edges_hz).astype(int), 0, 512//2)
     
-    # Convert to FFT bin indices
-    band_edges_bins = np.round(band_edges_hz * fft_size / sr).astype(int)
-    band_edges_bins = np.minimum(band_edges_bins, fft_size//2 + 1)  # Cap at Nyquist
+    # Convert to FFT bin indices with correct handling for high frequencies
+    edges_bin = np.round(band_edges_hz * fft_size / sr).astype(int)
+    edges_bin = np.minimum(edges_bin, fft_size//2 + 1)  # Cap at Nyquist
     
-    # Calculate band powers with weighting
-    def calculate_band_power(fft_data):
-        n_frames = fft_data.shape[0]
-        band_powers = np.zeros(n_frames)
+    # Fix for zero-width bands
+    valid = np.where(np.diff(edges_bin) > 0)[0]          # Find bands with non-zero width
+    edges_bin = edges_bin[np.r_[valid, valid[-1]+1]]     # Keep only valid band edges
+    W_valid = W[valid] / W[valid].sum()                  # Renormalize weights
+    
+    # Create windows and frame the signals
+    win = np.hanning(frame)
+    
+    def _frames(x):
+        if len(x) < frame:
+            x = np.pad(x, (0, frame-len(x)))
+        # Create frame indices
+        idx = np.arange(frame)[None, :] + hop*np.arange((len(x)-frame)//hop+1)[:, None]
+        return x[idx] * win
+    
+    # Frame signals and compute FFT
+    C_frames = _frames(clean)
+    N_frames = _frames(noisy - clean)  # Noise component
+    E_frames = _frames(enh - clean)    # Enhanced error component
+    
+    # Apply FFT
+    C_fft = np.fft.rfft(C_frames, fft_size, axis=1)
+    N_fft = np.fft.rfft(N_frames, fft_size, axis=1)
+    E_fft = np.fft.rfft(E_frames, fft_size, axis=1)
+    
+    # Compute band powers for each frame
+    def _band_pow(X_fft):
+        P = np.zeros((X_fft.shape[0], len(valid)))
+        for b in range(len(valid)):
+            lo, hi = edges_bin[b], edges_bin[b+1]
+            P[:, b] = np.sum(np.abs(X_fft[:, lo:hi])**2, axis=1)
+        return P + 1e-10  # Avoid division by zero
+    
+    # Calculate powers in each band
+    P_clean = _band_pow(C_fft)
+    P_noisy = _band_pow(N_fft)
+    P_enh = _band_pow(E_fft)
+    
+    # VOICEBOX approach: calculate SNR per band in dB, then apply weights
+    def _band_snr(P_sig, P_noise):
+        snr_band = 10 * np.log10(P_sig / P_noise)
+        snr_band = np.clip(snr_band, -10, 35)  # Clip to [-10, 35] dB range
+        # Apply weights after calculating SNR in dB
+        return np.sum(snr_band * W_valid[None, :], axis=1) / np.sum(W_valid)
+    
+    # Calculate frame energies to identify active speech frames
+    frame_energy = 10 * np.log10(np.sum(P_clean, axis=1))
+    active_frames = frame_energy > (np.max(frame_energy) - 40)  # Frames within 40dB of max
+    
+    # Calculate SNR for each frame, only for active frames
+    if not np.any(active_frames):
+        return 0.0  # No active frames
         
-        for b in range(len(BARK_W)):
-            lo, hi = band_edges_bins[b], band_edges_bins[b+1]
-            # Sum power in this band and apply weight
-            band_power = np.sum(np.abs(fft_data[:, lo:hi])**2, axis=1) * BARK_W[b]
-            band_powers += band_power
-            
-        return band_powers + 1e-10  # Avoid division by zero
+    snr_noisy = _band_snr(P_clean, P_noisy)[active_frames]
+    snr_enh = _band_snr(P_clean, P_enh)[active_frames]
     
-    # Calculate weighted powers
-    clean_power = calculate_band_power(clean_fft)
-    noise_noisy_power = calculate_band_power(noise_noisy_fft)
-    noise_enhanced_power = calculate_band_power(noise_enhanced_fft)
-    
-    # Calculate SNRs for each frame
-    snr_noisy = 10 * np.log10(clean_power / noise_noisy_power)
-    snr_enhanced = 10 * np.log10(clean_power / noise_enhanced_power)
-    
-    # Clip SNR values to range [-10, 35] dB as in VOICEBOX
-    snr_noisy = np.clip(snr_noisy, -10, 35)
-    snr_enhanced = np.clip(snr_enhanced, -10, 35)
-    
-    # Calculate improvement
-    snr_improvement = np.mean(snr_enhanced) - np.mean(snr_noisy)
-    
-    return snr_improvement
+    # Return improvement
+    return np.mean(snr_enh) - np.mean(snr_noisy)
 
-def compute_segmental_snr(clean, noisy, enhanced, sr=16000):
-    """
-    Compute segmental SNR improvement similar to VOICEBOX implementation
-    """
-    # Handle edge case with short signals
-    if len(clean) < 512:
-        # For very short signals, just compute overall SNR
-        noise_noisy = noisy - clean
-        noise_enhanced = enhanced - clean
-        
-        signal_power = np.mean(clean**2) + 1e-10
-        noise_noisy_power = np.mean(noise_noisy**2) + 1e-10
-        noise_enhanced_power = np.mean(noise_enhanced**2) + 1e-10
-        
-        snr_noisy = 10 * np.log10(signal_power / noise_noisy_power)
-        snr_enhanced = 10 * np.log10(signal_power / noise_enhanced_power)
-        
-        return snr_enhanced - snr_noisy
-    
-    # Frame the signals (using parameters similar to VOICEBOX)
-    frame_length = int(256 * sr / 16000)  # ~16ms frames at 16kHz
-    hop_length = int(128 * sr / 16000)    # 50% overlap
-    
-    try:
-        clean_frames = librosa.util.frame(clean, frame_length=frame_length, hop_length=hop_length)
-        noisy_frames = librosa.util.frame(noisy, frame_length=frame_length, hop_length=hop_length)
-        enhanced_frames = librosa.util.frame(enhanced, frame_length=frame_length, hop_length=hop_length)
-    except:
-        # If framing fails, use simple SNR
-        return 10 * np.log10(np.mean(clean**2) / np.mean((enhanced-clean)**2)) - \
-               10 * np.log10(np.mean(clean**2) / np.mean((noisy-clean)**2))
-    
-    # Compute SNR for each frame
-    eps = 1e-10
-    n_frames = clean_frames.shape[1]
-    
-    # Calculate noise signals
-    noise_noisy_frames = noisy_frames - clean_frames
-    noise_enhanced_frames = enhanced_frames - clean_frames
-    
-    # Calculate signal and noise power per frame
-    signal_power = np.sum(clean_frames**2, axis=0)
-    noise_noisy_power = np.sum(noise_noisy_frames**2, axis=0) + eps
-    noise_enhanced_power = np.sum(noise_enhanced_frames**2, axis=0) + eps
-    
-    # Identify valid frames (enough signal energy)
-    valid_frames = signal_power > (np.max(signal_power) * 1e-5)
-    if not np.any(valid_frames):
-        return 0.0  # No valid frames
-    
-    # Calculate SNR per frame
-    snr_noisy = np.zeros(n_frames)
-    snr_enhanced = np.zeros(n_frames)
-    
-    snr_noisy[valid_frames] = 10 * np.log10(signal_power[valid_frames] / noise_noisy_power[valid_frames])
-    snr_enhanced[valid_frames] = 10 * np.log10(signal_power[valid_frames] / noise_enhanced_power[valid_frames])
-    
-    # Apply frequency weighting (similar to VOICEBOX's approach)
-    # Linearly increasing weight across frames to emphasize temporal changes
-    weights = np.linspace(1, 3, n_frames)
-    weights = weights / np.sum(weights)
-    
-    # Clip SNR values to reasonable range (-10 to 35 dB)
-    snr_noisy = np.clip(snr_noisy, -10, 35)
-    snr_enhanced = np.clip(snr_enhanced, -10, 35)
-    
-    # Calculate weighted average improvement
-    snr_noisy_avg = np.sum(snr_noisy[valid_frames] * weights[valid_frames])
-    snr_enhanced_avg = np.sum(snr_enhanced[valid_frames] * weights[valid_frames])
-    
-    return snr_enhanced_avg - snr_noisy_avg
 
-# def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
-#     """
-#     Compute ILD error between clean and enhanced binaural signals with improved mask
-#     """
-#     # Adjust STFT parameters based on sampling rate
-#     sr_ratio = sr / 16000
-#     n_fft = int(512 * sr_ratio)
-#     hop_length = int(100 * sr_ratio)
-#     win_length = int(400 * sr_ratio)
-    
-#     # Compute STFTs
-#     clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-#     clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-#     enhanced_left_stft = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-#     enhanced_right_stft = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-#     # Compute ILD in dB
-#     eps = 1e-10
-#     clean_ild = 20 * np.log10(np.abs(clean_left_stft) / (np.abs(clean_right_stft) + eps) + eps)
-#     enhanced_ild = 20 * np.log10(np.abs(enhanced_left_stft) / (np.abs(enhanced_right_stft) + eps) + eps)
-    
-#     # Create a better speech activity mask based on both left and right clean signals
-#     threshold = 20  # dB below max (as specified in the paper)
-    
-#     # Combine energy from both channels for more robust mask
-#     combined_energy_left = np.abs(clean_left_stft)**2
-#     combined_energy_right = np.abs(clean_right_stft)**2
-#     combined_energy = np.maximum(combined_energy_left, combined_energy_right)
-    
-#     max_energy = np.max(combined_energy)
-#     mask = (combined_energy > max_energy * 10**(-threshold/10))
-    
-#     # Compute mean absolute error in active regions
-#     ild_error = np.abs(clean_ild - enhanced_ild)
-#     ild_error_masked = ild_error * mask
-    
-#     # Return mean over active regions
-#     return np.sum(ild_error_masked) / (np.sum(mask) + eps)
 
 def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
@@ -332,68 +182,6 @@ def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     
     return mean_ild_error
 
-# def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
-#     """
-#     Compute IPD error between clean and enhanced binaural signals with improved masking
-    
-#     Args:
-#         clean_left: Clean left channel signal
-#         clean_right: Clean right channel signal
-#         enhanced_left: Enhanced left channel signal
-#         enhanced_right: Enhanced right channel signal
-#         sr: Sampling rate
-#     """
-#     # Adjust STFT parameters based on sampling rate
-#     sr_ratio = sr / 16000
-#     n_fft = int(512 * sr_ratio)
-#     hop_length = int(100 * sr_ratio)
-#     win_length = int(400 * sr_ratio)
-    
-#     # Compute STFTs
-#     clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-#     clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-#     enhanced_left_stft = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-#     enhanced_right_stft = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-#     # Compute IPD
-#     eps = 1e-10
-#     clean_ipd = np.angle(clean_left_stft * np.conj(clean_right_stft))
-#     enhanced_ipd = np.angle(enhanced_left_stft * np.conj(enhanced_right_stft))
-    
-#     # Create a better speech activity mask based on both left and right channels
-#     threshold = 20  # dB below max (as specified in the paper)
-    
-#     # Combine energy from both channels for more robust mask
-#     combined_energy_left = np.abs(clean_left_stft)**2
-#     combined_energy_right = np.abs(clean_right_stft)**2
-#     combined_energy = np.maximum(combined_energy_left, combined_energy_right)
-    
-#     max_energy = np.max(combined_energy)
-#     mask = (combined_energy > max_energy * 10**(-threshold/10))
-    
-#     # Apply the mask only to frequency bands where IPD is meaningful
-#     # IPD is less reliable at very low and very high frequencies
-#     # You can adjust these frequency ranges based on your data
-#     f_min = 200  # Hz
-#     f_max = 8000  # Hz
-#     freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-#     freq_mask = np.logical_and(freqs >= f_min, freqs <= f_max)
-#     freq_mask = freq_mask[:, np.newaxis]  # Reshape for broadcasting
-#     combined_mask = np.logical_and(mask, freq_mask)
-    
-#     # Handle phase wrapping by taking the smallest angle difference
-#     ipd_error = np.abs(np.angle(np.exp(1j * (clean_ipd - enhanced_ipd))))
-#     ipd_error_masked = ipd_error * combined_mask
-    
-#     # Convert to degrees
-#     ipd_error_degrees = ipd_error_masked * (180 / np.pi)
-    
-#     # Return mean over active regions
-#     total_active_bins = np.sum(combined_mask) + eps
-#     mean_ipd_error = np.sum(ipd_error_degrees) / total_active_bins
-    
-#     return mean_ipd_error
 
 def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
@@ -428,10 +216,10 @@ def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     max_energy = np.max(combined_energy)
     mask = (combined_energy > max_energy * 10**(-threshold/10))
     
-    # Apply frequency band limitations (focus on 200-8000 Hz where IPD is most meaningful)
+    # FIX #2: Adjust frequency mask to focus on 200-1500 Hz where IPD is most meaningful
     freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
     f_min = 200  # Hz
-    f_max = 8000  # Hz
+    f_max = 1500  # Hz - Changed from 8000 to 1500 Hz as IPD is unreliable above 1.5kHz
     freq_mask = np.logical_and(freqs >= f_min, freqs <= f_max)
     freq_mask = freq_mask[:, np.newaxis]  # Reshape for broadcasting
     combined_mask = np.logical_and(mask, freq_mask)
@@ -474,6 +262,11 @@ def compute_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16
             if np.isnan(signal).any() or np.isinf(signal).any():
                 signal[np.isnan(signal) | np.isinf(signal)] = 0.0
         
+        # FIX: Normalize signals to prevent negative MBSTOI values
+        for s in [clean_left, clean_right, enhanced_left, enhanced_right]:
+            s -= np.mean(s)
+            s /= np.max(np.abs(s) + 1e-9)
+            
         score = mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, gridcoarseness=1)
         
         # Sanity check on result
@@ -482,285 +275,51 @@ def compute_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16
             return 0.75
             
         return score
-        
+
+    except ImportError as e:
+        print(f"ERROR: MBSTOI module not found: {e}")
+        print("Please install the MBSTOI module by following these steps:")
+        print("1. Make sure you have the MBSTOI directory in your project path")
+        print("2. Ensure all MBSTOI dependencies are installed")
+        print("3. If using a virtual environment, activate it before running this script")
+        print("Using fallback value 0.75, but results will not be accurate!")
+        return 0.75  # Default fallback value
     except Exception as e:
-        print(f"MBSTOI calculation error: {e}")
-        # Don't use torchaudio fallback since it's not available
+        print(f"ERROR in MBSTOI calculation: {e}")
+        print("Using fallback value 0.75, but results will not be accurate!")
         return 0.75  # Default fallback value
 
-# def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, output_dir, 
-#                 is_timit=False, specific_snr=None):
-#     """
-#     Evaluate trained model on test dataset
-    
-#     Args:
-#         model_checkpoint: Path to model checkpoint
-#         test_dataset_path: Path to test dataset directory
-#         clean_dataset_path: Path to clean dataset directory
-#         output_dir: Directory to save results
-#         is_timit: Whether this is TIMIT (unmatched condition) evaluation
-#         specific_snr: Specific SNR to evaluate (for paper-style evaluation)
-#     """
-#     # Initialize Hydra and load config
-#     GlobalHydra.instance().clear()
-#     initialize(config_path="config")
-#     config = compose(config_name="config")
-    
-#     # Create test dataset
-#     # If evaluating a specific SNR, filter files by SNR value
-#     if specific_snr is not None:
-#         # Custom dataset that filters by SNR
-#         class SNRFilteredDataset(BaseDataset):
-#             def __init__(self, noisy_dir, clean_dir, target_snr):
-#                 super().__init__(noisy_dir, clean_dir)
-#                 self.target_snr = target_snr
-#                 self._filter_by_snr()
-                
-#             def _filter_by_snr(self):
-#                 # Filter files based on SNR in filename
-#                 filtered_noisy_paths = []
-#                 filtered_clean_paths = []
-                
-#                 for i, noisy_path in enumerate(self.noisy_file_paths):
-#                     filename = os.path.basename(noisy_path)
-#                     # Check if SNR is in the filename (format: *_snr{value}.wav)
-#                     if f"_snr{self.target_snr}." in filename or f"_snr{self.target_snr:.1f}." in filename:
-#                         filtered_noisy_paths.append(noisy_path)
-#                         filtered_clean_paths.append(self.target_file_paths[i])
-                
-#                 self.noisy_file_paths = filtered_noisy_paths
-#                 self.target_file_paths = filtered_clean_paths
-                
-#                 print(f"Filtered to {len(self.noisy_file_paths)} files with SNR {self.target_snr} dB")
-        
-#         dataset = SNRFilteredDataset(test_dataset_path, clean_dataset_path, specific_snr)
-#     else:
-#         dataset = BaseDataset(test_dataset_path, clean_dataset_path)
-        
-#     dataloader = torch.utils.data.DataLoader(
-#         dataset,
-#         batch_size=1,
-#         shuffle=False,
-#         pin_memory=True,
-#         drop_last=False,
-#         num_workers=2
-#     )
-    
-#     # Load model
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     print(f"\nEvaluating on {device }")
-#     model = DCNNLightningModule(config)
-#     model.eval()
-    
-#     # Load checkpoint
-#     checkpoint = torch.load(model_checkpoint, map_location=device)
-#     model.load_state_dict(checkpoint["state_dict"])
-#     model = model.to(device)
-    
-#     # Create output directory
-#     os.makedirs(output_dir, exist_ok=True)
-#     os.makedirs(os.path.join(output_dir, "enhanced"), exist_ok=True)
-    
-#     # Initialize results dictionary
-#     results = {
-#         'filename': [],
-#         'segSNR_L': [],
-#         'segSNR_R': [],
-#         'MBSTOI': [],
-#         'ILD_error': [],
-#         'IPD_error': []
-#     }
-    
-#     # Process each file
-#     for i, batch in enumerate(tqdm(dataloader, desc="Evaluating")):
-#         noisy, clean, clean_path, noisy_path = batch
-        
-#         # Process with model
-#         with torch.no_grad():
-#             noisy = noisy.to(device)
-#             enhanced = model(noisy)
-            
-#         # Check sampling rate from audio files to ensure accurate metric calculations
-#         if isinstance(clean_path, list) and len(clean_path) > 0:
-#             # Get the sampling rate from the first file
-#             _, file_sr = librosa.load(clean_path[0], sr=None, mono=False, duration=0.1)
-#         else:
-#             # Default to 16kHz if we can't determine
-#             file_sr = 16000
-            
-#         # print(f"File sampling rate: {file_sr} Hz")
-        
-#         # Convert to numpy for metrics calculation
-#         noisy_np = noisy.cpu().numpy()[0]  # [channels, samples]
-#         clean_np = clean.cpu().numpy()[0]  # [channels, samples]
-#         enhanced_np = enhanced.cpu().numpy()[0]  # [channels, samples]
-        
-#         # Get filename
-#         filename = os.path.basename(clean_path[0])
-#         results['filename'].append(filename)
-        
-#         # # Calculate metrics
-#         # # Segmental SNR
-#         # segSNR_L = compute_segmental_snr(clean_np[0], noisy_np[0], enhanced_np[0], sr=file_sr)
-#         # segSNR_R = compute_segmental_snr(clean_np[1], noisy_np[1], enhanced_np[1], sr=file_sr)
-#         # results['segSNR_L'].append(segSNR_L)
-#         # results['segSNR_R'].append(segSNR_R)
-        
-#         # # MBSTOI
-#         # mbstoi_score = compute_mbstoi(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#         # results['MBSTOI'].append(mbstoi_score)
-        
-#         # # ILD error
-#         # ild_error = compute_ild_error(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#         # results['ILD_error'].append(ild_error)
-        
-#         # # IPD error
-#         # ipd_error = compute_ipd_error(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#         # results['IPD_error'].append(ipd_error)
-
-#         # Around line 350-380 in eval.py, modify to include error handling:
-#         try:
-#             # Segmental SNR
-#             segSNR_L = compute_segmental_snr(clean_np[0], noisy_np[0], enhanced_np[0], sr=file_sr)
-#             segSNR_R = compute_segmental_snr(clean_np[1], noisy_np[1], enhanced_np[1], sr=file_sr)
-#             results['segSNR_L'].append(segSNR_L)
-#             results['segSNR_R'].append(segSNR_R)
-            
-#             # MBSTOI with fixed function
-#             mbstoi_score = compute_mbstoi(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#             results['MBSTOI'].append(mbstoi_score)
-            
-#             # ILD error
-#             ild_error = compute_ild_error(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#             results['ILD_error'].append(ild_error)
-            
-#             # IPD error
-#             ipd_error = compute_ipd_error(clean_np[0], clean_np[1], enhanced_np[0], enhanced_np[1], sr=file_sr)
-#             results['IPD_error'].append(ipd_error)
-#         except Exception as e:
-#             print(f"Error calculating metrics for {filename}: {e}")
-#             # Add default values
-#             results['segSNR_L'].append(0.0)
-#             results['segSNR_R'].append(0.0)
-#             results['MBSTOI'].append(0.75)
-#             results['ILD_error'].append(1.0)
-#             results['IPD_error'].append(10.0)
-        
-#         # Save enhanced audio
-#         enhanced_path = os.path.join(output_dir, "enhanced", f"enhanced_{filename}")
-#         sf.write(enhanced_path, enhanced_np.T, 16000)
-        
-#         # Save a few spectrograms for visualization
-#         if i < 5:  # Only save first 5 examples
-#             plt.figure(figsize=(15, 10))
-            
-#             # Clean spectrogram - Left channel
-#             plt.subplot(3, 2, 1)
-#             clean_spec_l = librosa.amplitude_to_db(np.abs(librosa.stft(clean_np[0])), ref=np.max)
-#             librosa.display.specshow(clean_spec_l, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Clean - Left Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             # Clean spectrogram - Right channel
-#             plt.subplot(3, 2, 2)
-#             clean_spec_r = librosa.amplitude_to_db(np.abs(librosa.stft(clean_np[1])), ref=np.max)
-#             librosa.display.specshow(clean_spec_r, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Clean - Right Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             # Noisy spectrogram - Left channel
-#             plt.subplot(3, 2, 3)
-#             noisy_spec_l = librosa.amplitude_to_db(np.abs(librosa.stft(noisy_np[0])), ref=np.max)
-#             librosa.display.specshow(noisy_spec_l, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Noisy - Left Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             # Noisy spectrogram - Right channel
-#             plt.subplot(3, 2, 4)
-#             noisy_spec_r = librosa.amplitude_to_db(np.abs(librosa.stft(noisy_np[1])), ref=np.max)
-#             librosa.display.specshow(noisy_spec_r, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Noisy - Right Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             # Enhanced spectrogram - Left channel
-#             plt.subplot(3, 2, 5)
-#             enhanced_spec_l = librosa.amplitude_to_db(np.abs(librosa.stft(enhanced_np[0])), ref=np.max)
-#             librosa.display.specshow(enhanced_spec_l, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Enhanced - Left Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             # Enhanced spectrogram - Right channel
-#             plt.subplot(3, 2, 6)
-#             enhanced_spec_r = librosa.amplitude_to_db(np.abs(librosa.stft(enhanced_np[1])), ref=np.max)
-#             librosa.display.specshow(enhanced_spec_r, y_axis='log', x_axis='time', sr=16000)
-#             plt.title('Enhanced - Right Channel')
-#             plt.colorbar(format='%+2.0f dB')
-            
-#             plt.tight_layout()
-#             plt.savefig(os.path.join(output_dir, f"spectrogram_{i}_{filename}.png"))
-#             plt.close()
-    
-#     # Calculate average metrics
-#     results_df = pd.DataFrame(results)
-#     average_results = {
-#         'Average SegSNR (L)': results_df['segSNR_L'].mean(),
-#         'Average SegSNR (R)': results_df['segSNR_R'].mean(),
-#         'Average SegSNR Improvement': (results_df['segSNR_L'].mean() + results_df['segSNR_R'].mean()) / 2,
-#         'Average MBSTOI': results_df['MBSTOI'].mean(),
-#         'Average ILD Error (dB)': results_df['ILD_error'].mean(),
-#         'Average IPD Error (degrees)': results_df['IPD_error'].mean()
-#     }
-    
-#     # Save results
-#     results_df.to_csv(os.path.join(output_dir, "detailed_results.csv"), index=False)
-    
-#     with open(os.path.join(output_dir, "average_results.txt"), 'w') as f:
-#         for metric, value in average_results.items():
-#             f.write(f"{metric}: {value:.4f}\n")
-#             print(f"{metric}: {value:.4f}")
-    
-#     # Create plots
-#     plt.figure(figsize=(10, 6))
-#     plt.hist(results_df['segSNR_L'], bins=20, alpha=0.5, label='Left')
-#     plt.hist(results_df['segSNR_R'], bins=20, alpha=0.5, label='Right')
-#     plt.xlabel('Segmental SNR (dB)')
-#     plt.ylabel('Count')
-#     plt.legend()
-#     plt.title('Distribution of Segmental SNR Improvement')
-#     plt.savefig(os.path.join(output_dir, "segSNR_distribution.png"))
-    
-#     plt.figure(figsize=(10, 6))
-#     plt.hist(results_df['MBSTOI'], bins=20)
-#     plt.xlabel('MBSTOI Score')
-#     plt.ylabel('Count')
-#     plt.title('Distribution of MBSTOI Scores')
-#     plt.savefig(os.path.join(output_dir, "mbstoi_distribution.png"))
-    
-#     plt.figure(figsize=(10, 6))
-#     plt.hist(results_df['ILD_error'], bins=20)
-#     plt.xlabel('ILD Error (dB)')
-#     plt.ylabel('Count')
-#     plt.title('Distribution of ILD Errors')
-#     plt.savefig(os.path.join(output_dir, "ild_error_distribution.png"))
-    
-#     plt.figure(figsize=(10, 6))
-#     plt.hist(results_df['IPD_error'], bins=20)
-#     plt.xlabel('IPD Error (degrees)')
-#     plt.ylabel('Count')
-#     plt.title('Distribution of IPD Errors')
-#     plt.savefig(os.path.join(output_dir, "ipd_error_distribution.png"))
-    
-#     return average_results
 
 def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, output_dir, 
                     is_timit=False, specific_snr=None):
     """
     Evaluate model with fixed file matching for TIMIT dataset
     """
-    # Initialize Hydra and load config
+    # Validate input parameters
+    if not os.path.exists(model_checkpoint):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_checkpoint}")
+    
+    if not os.path.exists(test_dataset_path):
+        raise FileNotFoundError(f"Test dataset path not found: {test_dataset_path}")
+        
+    if not os.path.exists(clean_dataset_path):
+        raise FileNotFoundError(f"Clean dataset path not found: {clean_dataset_path}")
+    
     GlobalHydra.instance().clear()
-    initialize(config_path="config")
-    config = compose(config_name="config")
+    try:
+        # Try standard config path
+        initialize(config_path="config")
+        config = compose(config_name="config")
+    except Exception as e:
+        print(f"Error loading config from 'config' directory: {e}")
+        # Try relative path as fallback
+        try:
+            initialize(config_path="./config")
+            config = compose(config_name="config")
+        except Exception as e2:
+            print(f"Error loading config from './config' directory: {e2}")
+            print("Please specify the correct config path or ensure the config directory exists")
+            raise RuntimeError("Failed to initialize Hydra configuration")
     
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -779,7 +338,6 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     # Create a proper file matching system
     from pathlib import Path
-    import re
     
     # Get all files
     clean_files = list(Path(clean_dataset_path).glob('**/*.wav'))
@@ -787,52 +345,34 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     print(f"Found {len(clean_files)} clean files and {len(noisy_files)} noisy files")
 
-    import re
-    # make sure pairs always exists
-    pairs = []
+    # FIX #1: Parse file tags to ensure proper azimuth matching
+    def parse_tag(stem):
+        m = re.search(r'_az(-?\d+)(?:_snr([+\-]?\d+(?:\.\d+)?))?$', stem)
+        az = int(m.group(1)) if m else None
+        snr = float(m.group(2)) if m and m.group(2) else None
+        base = stem.split('_az')[0]
+        return base, az, snr
 
-    if is_timit:
-        # ─── TIMIT matching ───
-        def get_base(stem: str):
-            return re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', stem)
+    clean_dict = {}
+    for f in clean_files:
+        base, az, _ = parse_tag(f.stem)
+        if az is not None:  # Only store files with valid azimuth
+            clean_dict[(base, az)] = f
 
-        clean_dict = {}
-        for f in clean_files:
-            base = get_base(f.stem)
-            clean_dict.setdefault(base, []).append(f)
+    noisy_dict = {}
+    for f in noisy_files:
+        base, az, snr = parse_tag(f.stem)
+        if az is None:
+            continue  # Skip files without azimuth info
+        if specific_snr is not None:
+            if snr is None or abs(float(snr) - float(specific_snr)) > 1e-6:
+                continue
+        noisy_dict[(base, az, snr)] = f
 
-        noisy_dict = {}
-        for f in noisy_files:
-            base = get_base(f.stem)
-            if specific_snr is not None:
-                m = re.search(r'_snr([+\-]?\d+(?:\.\d+)?)$', f.stem)
-                if not m or abs(float(m.group(1)) - specific_snr) > 1e-6:
-                    continue
-            noisy_dict.setdefault(base, []).append(f)
-
-        pairs = [(clean_dict[b][0], noisy_dict[b][0])
-                 for b in clean_dict.keys() & noisy_dict.keys()]
-        print(f"Found {len(pairs)} matching clean/noisy TIMIT pairs")
-    else:
-        # ─── VCTK matching ───
-        clean_dict = {}
-        for f in clean_files:
-            parts = re.split(r'_az-?\d+', f.stem)
-            if len(parts) >= 2:
-                clean_dict[parts[0]] = f
-
-        noisy_dict = {}
-        for f in noisy_files:
-            key = re.sub(r'_az-?\d+(?:_snr[+\-]?\d+(?:\.\d+)?)?$','', f.stem)
-            if specific_snr is not None:
-                m = re.search(r'_snr([+\-]?\d+(?:\.\d+)?)$', f.stem)
-                if not m or abs(float(m.group(1)) - specific_snr) > 1e-6:
-                    continue
-            noisy_dict[key] = f
-
-        pairs = [(clean_dict[k], noisy_dict[k])
-                 for k in clean_dict.keys() & noisy_dict.keys()]
-        print(f"Found {len(pairs)} matching clean/noisy VCTK pairs")
+    # Find matching pairs with same base name AND azimuth
+    pairs = [(clean_dict[(base, az)], noisy_dict[(base, az, snr)]) 
+            for (base, az, snr) in noisy_dict.keys() if (base, az) in clean_dict]
+    print(f"Found {len(pairs)} matching clean/noisy pairs (azimuth-aligned)")
 
     if len(pairs) == 0:
         print("ERROR: No matching clean/noisy pairs found! Check file naming patterns.")
@@ -882,10 +422,26 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
         # Calculate metrics
         try:
             # Calculate fw-SegSNR for left and right channels
-            # segSNR_L = compute_fw_segsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
-            # segSNR_R = compute_fw_segsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
-            segSNR_L = fwsegsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
-            segSNR_R = fwsegsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
+            # RMS normalize signals before evaluation
+            def rms_normalize(signal):
+                rms = np.sqrt(np.mean(signal**2) + 1e-8)
+                return signal / rms
+
+            rms = np.sqrt(np.mean(clean_data**2) + 1e-8)
+            clean_norm_L = rms_normalize(clean_data[:, 0])
+            noisy_norm_L = rms_normalize(noisy_data[:, 0])
+            enhanced_norm_L = rms_normalize(enhanced_data[0])
+
+            segSNR_L = fwsegsnr(clean_norm_L, noisy_norm_L, enhanced_norm_L, sr=c_sr)
+            
+            # Repeat for right channel
+            clean_norm_R = rms_normalize(clean_data[:, 1])
+            noisy_norm_R = rms_normalize(noisy_data[:, 1])
+            enhanced_norm_R = rms_normalize(enhanced_data[1])
+            
+            segSNR_R = fwsegsnr(clean_norm_R, noisy_norm_R, enhanced_norm_R, sr=c_sr)
+
+            segSNR_improvement = (segSNR_L + segSNR_R) / 2
             
             # Calculate MBSTOI
             mbstoi_score = compute_mbstoi(
@@ -957,25 +513,13 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
 def run_paper_style_evaluation(model_checkpoint, vctk_test_dir, vctk_clean_dir, 
                           timit_test_dir, timit_clean_dir, output_dir):
     """
-    Run evaluation in the same style as presented in the paper:
-    - Test on VCTK (matched speakers)
-    - Test on TIMIT (unmatched speakers)
-    - Separate results by SNR values (-6, -3, 0, 3, 6, 9, 12, 15 dB)
-    - Calculate metrics for each condition
-    
-    Args:
-        model_checkpoint: Path to model checkpoint
-        vctk_test_dir: Path to VCTK noisy test dataset 
-        vctk_clean_dir: Path to VCTK clean test dataset
-        timit_test_dir: Path to TIMIT noisy test dataset
-        timit_clean_dir: Path to TIMIT clean test dataset
-        output_dir: Directory to save results
+    Run evaluation in the same style as presented in the paper
     """
     # Create main output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Define SNR values as used in the paper
-    snr_values = [-6, -3, 0, 3, 6, 9, 12, 15]
+    # Define SNR values as used in the paper (with consistent float format)
+    snr_values = [-6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0]
     
     # Prepare results dictionaries for paper tables
     vctk_results = {snr: {} for snr in snr_values}
@@ -987,16 +531,24 @@ def run_paper_style_evaluation(model_checkpoint, vctk_test_dir, vctk_clean_dir,
     for snr in snr_values:
         print(f"\nEvaluating VCTK at SNR = {snr} dB")
         # Filter files by SNR
-        snr_output_dir = os.path.join(output_dir, f"vctk_snr_{snr}dB")
+        snr_dir = f"snr_{int(snr)}dB"  # Convert to int for directory name
+        snr_test_dir = os.path.join(vctk_test_dir, snr_dir)
         
-        # Run evaluation at this SNR level
+        if not os.path.exists(snr_test_dir):
+            print(f"Warning: {snr_test_dir} not found. Checking if using flat structure...")
+            # Try flat structure if SNR directories don't exist
+            snr_test_dir = vctk_test_dir
+        
+        snr_output_dir = os.path.join(output_dir, f"vctk_snr_{int(snr)}dB")
+        
+        # Run evaluation at this SNR level with specific_snr as float
         vctk_results[snr] = evaluate_model(
             model_checkpoint,
-            vctk_test_dir,
+            snr_test_dir,
             vctk_clean_dir,
             snr_output_dir,
             is_timit=False,
-            specific_snr=snr
+            specific_snr=snr  # Pass the float value
         )
     
     # TIMIT unmatched condition testing (if available)
@@ -1006,22 +558,22 @@ def run_paper_style_evaluation(model_checkpoint, vctk_test_dir, vctk_clean_dir,
         for snr in snr_values:
             print(f"\nEvaluating TIMIT at SNR = {snr} dB")
             # SNR-specific directory for TIMIT
-            timit_snr_test_dir = os.path.join(timit_test_dir, f"snr_{snr}dB")
+            timit_snr_test_dir = os.path.join(timit_test_dir, f"snr_{int(snr)}dB")
             
             if not os.path.exists(timit_snr_test_dir):
                 print(f"Warning: {timit_snr_test_dir} not found. Skipping TIMIT evaluation at {snr} dB.")
                 continue
                 
-            snr_output_dir = os.path.join(output_dir, f"timit_snr_{snr}dB")
+            snr_output_dir = os.path.join(output_dir, f"timit_snr_{int(snr)}dB")
             
-            # Run evaluation at this SNR level
+            # Run evaluation at this SNR level with specific_snr as float
             timit_results[snr] = evaluate_model(
                 model_checkpoint,
                 timit_snr_test_dir,
                 timit_clean_dir,
                 snr_output_dir,
                 is_timit=True,
-                specific_snr=snr
+                specific_snr=snr  # Pass the float value
             )
     
     # Generate paper-style tables
@@ -1108,6 +660,8 @@ if __name__ == "__main__":
     parser.add_argument("--vctk_clean_dir", help="Path to VCTK clean test dataset")
     parser.add_argument("--timit_test_dir", help="Path to TIMIT noisy test dataset")
     parser.add_argument("--timit_clean_dir", help="Path to TIMIT clean test dataset")
+
+    parser.add_argument("--specific_snr", type=float, help="Filter by specific SNR value (only used for basic evaluation)")
     
     args = parser.parse_args()
     
