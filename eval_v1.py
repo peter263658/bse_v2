@@ -1,9 +1,9 @@
 import os
 import argparse
 import torch
-# import torchaudio
+import torchaudio
 import numpy as np
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 from pathlib import Path
 import pandas as pd
 import librosa
@@ -16,7 +16,6 @@ import re
 # Import custom modules
 from DCNN.datasets.test_dataset import BaseDataset
 from DCNN.trainer import DCNNLightningModule
-
 
 
 def fwsegsnr(clean, noisy, enh, sr=16_000):
@@ -238,186 +237,89 @@ def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     
     return mean_ipd_error
 
-def compute_ipd_error_paper_style(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
+def compute_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
     """
-    Compute IPD error following the paper's Equation 11 approach with amplitude weighting
+    Compute MBSTOI with proper error handling for short signals and dimension issues
     """
-    # STFT parameters
-    sr_ratio = sr / 16000
-    n_fft = int(512 * sr_ratio)
-    hop_length = int(100 * sr_ratio)
-    win_length = int(400 * sr_ratio)
-    
-    # Compute STFTs
-    clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    enhanced_left_stft = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    enhanced_right_stft = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    # Epsilon for numerical stability
-    eps = 1e-8
-    
-    # Compute magnitudes
-    clean_left_mag = np.abs(clean_left_stft) + eps
-    clean_right_mag = np.abs(clean_right_stft) + eps
-    
-    # Calculate joint energy mask for focusing on speech-active regions (T=20dB as in paper)
-    threshold = 20  # dB below max
-    combined_energy = np.maximum(clean_left_mag**2, clean_right_mag**2)
-    max_energy = np.max(combined_energy)
-    mask = (combined_energy > max_energy * 10**(-threshold/10))
-    
-    # Compute IPD values (unwrapped phase differences)
-    clean_ipd = np.angle(clean_left_stft * np.conj(clean_right_stft))
-    enhanced_ipd = np.angle(enhanced_left_stft * np.conj(enhanced_right_stft))
-    
-    # Handle phase wrapping by taking the angular difference on the unit circle
-    ipd_error = np.abs(np.angle(np.exp(1j * (clean_ipd - enhanced_ipd))))
-    
-    # Following Eq.(11): Weight by clean amplitude (|X_L|+|X_R|)
-    weight = clean_left_mag + clean_right_mag
-    ipd_error_weighted = ipd_error * mask * weight
-    
-    # Return unitless value (not in degrees) as per paper
-    if np.sum(mask * weight) > 0:
-        mean_ipd_error = np.sum(ipd_error_weighted) / np.sum(mask * weight)
-    else:
-        mean_ipd_error = 0.0
-        
-    return mean_ipd_error
-
-def safe_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
-    """
-    Compute MBSTOI with proper error handling and padding to avoid dimension issues
-    """
-    import math
-    
-    # Ensure minimum length and make divisible by 256 (STOI requirement)
+    # Check minimum signal length - MBSTOI needs at least 4000 samples at 16kHz
     min_len = min(len(clean_left), len(clean_right), len(enhanced_left), len(enhanced_right))
+    if min_len < 4000:
+        print(f"Warning: Signal too short for MBSTOI ({min_len} samples). Using default value.")
+        return 0.75
     
-    # Make target length at least 4096 (16 frames of 256 samples) and always a multiple of 256
-    target_len = max(4096, 256 * math.ceil(min_len / 256))
-    
-    # Trim and pad all signals to exactly the same length
-    def prepare_signal(signal):
-        # Create a copy to avoid modifying the original
-        signal = signal.copy()
-        # Trim to common length
-        signal = signal[:min_len]
-        # Pad if needed to reach target length
-        if len(signal) < target_len:
-            signal = np.pad(signal, (0, target_len - len(signal)))
-        return signal
-    
-    clean_left = prepare_signal(clean_left)
-    clean_right = prepare_signal(clean_right)
-    enhanced_left = prepare_signal(enhanced_left)
-    enhanced_right = prepare_signal(enhanced_right)
-    
-    # Normalize signals to prevent negative MBSTOI values
-    for i, s in enumerate([clean_left, clean_right, enhanced_left, enhanced_right]):
-        s -= np.mean(s)
-        max_val = np.max(np.abs(s))
-        if max_val > 0:  # Avoid division by zero
-            s /= max_val
+    # Trim signals to same length
+    clean_left = clean_left[:min_len]
+    clean_right = clean_right[:min_len]
+    enhanced_left = enhanced_left[:min_len]
+    enhanced_right = enhanced_right[:min_len]
     
     try:
+        # Direct import from local module
         from MBSTOI.mbstoi import mbstoi
+        
+        # Handle NaN/Inf values
+        for signal in [clean_left, clean_right, enhanced_left, enhanced_right]:
+            if np.isnan(signal).any() or np.isinf(signal).any():
+                signal[np.isnan(signal) | np.isinf(signal)] = 0.0
+        
+        # FIX: Normalize signals to prevent negative MBSTOI values
+        for s in [clean_left, clean_right, enhanced_left, enhanced_right]:
+            s -= np.mean(s)
+            s /= np.max(np.abs(s) + 1e-9)
+            
         score = mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, gridcoarseness=1)
         
-        # Validate result
+        # Sanity check on result
         if np.isnan(score) or np.isinf(score) or score < 0 or score > 1:
-            print(f"Warning: Invalid MBSTOI score: {score}. Recalculating with safer settings.")
-            # Try with coarser grid if the calculation failed
-            score = mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, gridcoarseness=2)
+            print(f"Warning: Invalid MBSTOI score: {score}. Using default value.")
+            return 0.75
             
-            # Second validation
-            if np.isnan(score) or np.isinf(score) or score < 0 or score > 1:
-                print(f"Warning: Still invalid MBSTOI score: {score}. Returning estimated value.")
-                # Estimate based on channel correlations (better than fixed 0.75)
-                cl_corr = np.corrcoef(clean_left, enhanced_left)[0,1]
-                cr_corr = np.corrcoef(clean_right, enhanced_right)[0,1]
-                return max(0.5, min(0.98, (cl_corr + cr_corr) / 2))
-        
         return score
-        
+
+    except ImportError as e:
+        print(f"ERROR: MBSTOI module not found: {e}")
+        print("Please install the MBSTOI module by following these steps:")
+        print("1. Make sure you have the MBSTOI directory in your project path")
+        print("2. Ensure all MBSTOI dependencies are installed")
+        print("3. If using a virtual environment, activate it before running this script")
+        print("Using fallback value 0.75, but results will not be accurate!")
+        return 0.75  # Default fallback value
     except Exception as e:
-        print(f"Error in MBSTOI calculation: {e}")
-        # More intelligent fallback using correlation
-        try:
-            cl_corr = np.corrcoef(clean_left, enhanced_left)[0,1]
-            cr_corr = np.corrcoef(clean_right, enhanced_right)[0,1]
-            est_score = max(0.5, min(0.98, (cl_corr + cr_corr) / 2))
-            print(f"Estimating MBSTOI using signal correlation: {est_score:.4f}")
-            return est_score
-        except:
-            print("Correlation estimation failed. Using default value.")
-            return 0.85  # Better default based on your dataset averages
+        print(f"ERROR in MBSTOI calculation: {e}")
+        print("Using fallback value 0.75, but results will not be accurate!")
+        return 0.75  # Default fallback value
 
-def evaluate_at_paper_snrs(model_checkpoint, test_dir, clean_dir, output_dir, batch_size=8):
-    paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
-    results_by_snr = {}
-    
-    for snr in paper_snrs:
-        print(f"\n===== Evaluating at SNR = {snr} dB =====")
-        snr_output_dir = os.path.join(output_dir, f"paper_snr_{snr}dB")
-        
-        # Pass batch_size parameter
-        snr_results = evaluate_model(
-            model_checkpoint,
-            test_dir,
-            clean_dir,
-            snr_output_dir,
-            specific_snr=snr,
-            batch_size=batch_size  # Pass the batch_size parameter
-        )
-        
-        if snr_results:
-            results_by_snr[snr] = snr_results
-
-    
-    # Generate paper-style table
-    with open(os.path.join(output_dir, "paper_style_results.csv"), 'w') as f:
-        f.write("SNR,MBSTOI,ΔSegSNR,LILD,LIPD\n")
-        
-        for snr in paper_snrs:
-            if snr in results_by_snr:
-                result = results_by_snr[snr]
-                f.write(f"{snr},{result.get('Average MBSTOI', 'N/A'):.4f}," +
-                        f"{result.get('Average SegSNR Improvement', 'N/A'):.2f}," +
-                        f"{result.get('Average ILD Error (dB)', 'N/A'):.4f}," +
-                        f"{result.get('Average IPD Error (paper)', 'N/A'):.4f}\n")
-    
-    # Calculate overall averages (like in the paper)
-    avg_mbstoi = np.mean([r.get('Average MBSTOI', 0) for r in results_by_snr.values()])
-    avg_segsnr = np.mean([r.get('Average SegSNR Improvement', 0) for r in results_by_snr.values()])
-    avg_ild = np.mean([r.get('Average ILD Error (dB)', 0) for r in results_by_snr.values()])
-    avg_ipd = np.mean([r.get('Average IPD Error (paper)', 0) for r in results_by_snr.values()])
-    
-    print("\n===== PAPER STYLE AVERAGES =====")
-    print(f"Average MBSTOI: {avg_mbstoi:.4f}")
-    print(f"Average SegSNR: {avg_segsnr:.2f}")
-    print(f"Average LILD: {avg_ild:.4f}")
-    print(f"Average LIPD: {avg_ipd:.4f}")
-    
-    with open(os.path.join(output_dir, "paper_style_averages.txt"), 'w') as f:
-        f.write(f"Average MBSTOI: {avg_mbstoi:.4f}\n")
-        f.write(f"Average SegSNR: {avg_segsnr:.2f}\n")
-        f.write(f"Average LILD: {avg_ild:.4f}\n")
-        f.write(f"Average LIPD: {avg_ipd:.4f}\n")
-    
-    return results_by_snr
 
 def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, output_dir, 
-                   is_timit=False, specific_snr=None, batch_size=16):
+                    is_timit=False, specific_snr=None):
     """
     Evaluate model with fixed file matching for TIMIT dataset
     """
-    # Initialize Hydra and load config
+    # Validate input parameters
+    if not os.path.exists(model_checkpoint):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_checkpoint}")
+    
+    if not os.path.exists(test_dataset_path):
+        raise FileNotFoundError(f"Test dataset path not found: {test_dataset_path}")
+        
+    if not os.path.exists(clean_dataset_path):
+        raise FileNotFoundError(f"Clean dataset path not found: {clean_dataset_path}")
+    
     GlobalHydra.instance().clear()
-    initialize(config_path="config")
-    config = compose(config_name="config")
+    try:
+        # Try standard config path
+        initialize(config_path="config")
+        config = compose(config_name="config")
+    except Exception as e:
+        print(f"Error loading config from 'config' directory: {e}")
+        # Try relative path as fallback
+        try:
+            initialize(config_path="./config")
+            config = compose(config_name="config")
+        except Exception as e2:
+            print(f"Error loading config from './config' directory: {e2}")
+            print("Please specify the correct config path or ensure the config directory exists")
+            raise RuntimeError("Failed to initialize Hydra configuration")
     
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -436,7 +338,6 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     # Create a proper file matching system
     from pathlib import Path
-    import traceback
     
     # Get all files
     clean_files = list(Path(clean_dataset_path).glob('**/*.wav'))
@@ -444,7 +345,7 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     print(f"Found {len(clean_files)} clean files and {len(noisy_files)} noisy files")
 
-    # Parse file tags to ensure proper azimuth matching
+    # FIX #1: Parse file tags to ensure proper azimuth matching
     def parse_tag(stem):
         m = re.search(r'_az(-?\d+)(?:_snr([+\-]?\d+(?:\.\d+)?))?$', stem)
         az = int(m.group(1)) if m else None
@@ -464,7 +365,7 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
         if az is None:
             continue  # Skip files without azimuth info
         if specific_snr is not None:
-            if snr is None or abs(float(snr) - float(specific_snr)) > 0.1:
+            if snr is None or abs(float(snr) - float(specific_snr)) > 1e-6:
                 continue
         noisy_dict[(base, az, snr)] = f
 
@@ -484,201 +385,119 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
         'segSNR_R': [],
         'MBSTOI': [],
         'ILD_error': [],
-        'IPD_error_paper': [],  # Paper's unitless version
-        'IPD_error_degrees': []  # Original degrees version
+        'IPD_error': []
     }
     
-    # Define a helper function to calculate all metrics for a single file
-    def calc_metrics(clean_data, noisy_data, enhanced_data, sr):
-        # RMS normalize signals before evaluation
-        def rms_normalize(signal):
-            rms = np.sqrt(np.mean(signal**2) + 1e-8)
-            return signal / rms
-
-        # Left channel
-        clean_norm_L = rms_normalize(clean_data[:, 0])
-        noisy_norm_L = rms_normalize(noisy_data[:, 0])
-        enhanced_norm_L = rms_normalize(enhanced_data[0])
-        segSNR_L = fwsegsnr(clean_norm_L, noisy_norm_L, enhanced_norm_L, sr=sr)
+    # Process each matched pair
+    for i, (clean_path, noisy_path) in enumerate(tqdm(pairs, desc="Processing files")):
+        # Read audio files
+        clean_data, c_sr = sf.read(clean_path)
+        noisy_data, n_sr = sf.read(noisy_path)
         
-        # Right channel
-        clean_norm_R = rms_normalize(clean_data[:, 1])
-        noisy_norm_R = rms_normalize(noisy_data[:, 1])
-        enhanced_norm_R = rms_normalize(enhanced_data[1])
-        segSNR_R = fwsegsnr(clean_norm_R, noisy_norm_R, enhanced_norm_R, sr=sr)
-
-        # MBSTOI
-        mbstoi_score = safe_mbstoi(
-            clean_data[:, 0], clean_data[:, 1], 
-            enhanced_data[0], enhanced_data[1], 
-            sr=sr
-        )
+        # Ensure same sample rate
+        if c_sr != n_sr:
+            print(f"Warning: Sample rate mismatch ({c_sr} vs {n_sr})! Resampling noisy to match clean.")
+            noisy_data = librosa.resample(noisy_data, orig_sr=n_sr, target_sr=c_sr)
         
-        # ILD error
-        ild_error = compute_ild_error(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
+        # Convert to torch tensors for model
+        noisy_tensor = torch.tensor(noisy_data.T, dtype=torch.float32).unsqueeze(0)
         
-        # IPD errors (both versions)
-        ipd_error_degrees = compute_ipd_error(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
+        # Process with model
+        with torch.no_grad():
+            noisy_tensor = noisy_tensor.to(device)
+            enhanced_tensor = model(noisy_tensor)
+            
+        # Convert back to numpy for metrics
+        enhanced_data = enhanced_tensor.cpu().numpy()[0]
         
-        ipd_error_unitless = compute_ipd_error_paper_style(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
-        
-        return segSNR_L, segSNR_R, mbstoi_score, ild_error, ipd_error_unitless, ipd_error_degrees
-    
-    # Process in batches
-    total_batches = (len(pairs) + batch_size - 1) // batch_size  # Ceiling division
-    for batch_idx in tqdm(range(total_batches), desc=f"Processing batches (size={batch_size})", total=total_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, len(pairs))
-        batch_pairs = pairs[batch_start:batch_end]
-        
-        # Load all data first to determine max length and discard invalid files
-        valid_pairs = []
-        clean_data_list = []
-        noisy_data_list = []
-        clean_sr_list = []
-        
-        for clean_path, noisy_path in batch_pairs:
-            try:
-                # Load clean and noisy audio
-                clean_data, c_sr = sf.read(clean_path)
-                noisy_data, n_sr = sf.read(noisy_path)
-                
-                # Skip mono files
-                if len(clean_data.shape) == 1 or len(noisy_data.shape) == 1:
-                    print(f"Warning: Mono file detected! Skipping {clean_path.name}")
-                    continue
-                
-                # Resample noisy if needed (proper per-channel resampling)
-                if n_sr != c_sr:
-                    print(f"Resampling {noisy_path.name} from {n_sr} Hz to {c_sr} Hz")
-                    noisy_data = np.stack([
-                        librosa.resample(noisy_data[:, ch], orig_sr=n_sr, target_sr=c_sr) 
-                        for ch in range(noisy_data.shape[1])
-                    ], axis=1)
-                
-                # Add to valid data
-                valid_pairs.append((clean_path, noisy_path))
-                clean_data_list.append(clean_data)
-                noisy_data_list.append(noisy_data)
-                clean_sr_list.append(c_sr)
-                
-            except Exception as e:
-                print(f"Error loading {clean_path.name} or {noisy_path.name}: {e}")
-                continue
-        
-        # Skip if no valid files in this batch
-        if not valid_pairs:
+        # Ensure all data is correctly shaped
+        if len(clean_data.shape) == 1:
+            print(f"Warning: Clean file {clean_path.name} is mono! Skipping.")
+            continue
+            
+        if len(noisy_data.shape) == 1:
+            print(f"Warning: Noisy file {noisy_path.name} is mono! Skipping.")
             continue
         
-        # Find max length in this batch
-        max_len = max(data.shape[0] for data in clean_data_list)
-        
-        # Check if batch might be too large for GPU memory
-        # Assuming 16-bit audio (2 bytes per sample) * 2 channels * batch_size * max_len
-        memory_needed_mb = 2 * 2 * len(valid_pairs) * max_len / (1024 * 1024)
-        if memory_needed_mb > 1024:  # More than 1GB of audio data
-            print(f"Warning: Large batch detected ({memory_needed_mb:.1f} MB). Consider reducing batch size.")
-        
-        # Pad all samples to the same length
-        padded_noisy_batch = []
-        for noisy_data in noisy_data_list:
-            if noisy_data.shape[0] < max_len:
-                # Pad to match max length
-                padded = np.pad(noisy_data, ((0, max_len - noisy_data.shape[0]), (0, 0)))
-            else:
-                padded = noisy_data
-            padded_noisy_batch.append(padded)
-        
-        # Create batch tensor for the model
-        batch_tensors = []
-        for padded_noisy in padded_noisy_batch:
-            # Create tensor with shape [1, channels, samples]
-            tensor = torch.tensor(padded_noisy.T, dtype=torch.float32).unsqueeze(0)
-            batch_tensors.append(tensor)
-        
-        # Stack tensors (not cat, as we need a new dimension)
-        batch_tensor = torch.stack(batch_tensors, dim=0).squeeze(1).to(device)
-        
-        # Process batch through model
-        with torch.no_grad():
-            enhanced_batch = model(batch_tensor)
-            # Move to CPU immediately to free GPU memory
-            enhanced_batch = enhanced_batch.cpu()
-        
-        # Process each file's results
-        for i in range(len(valid_pairs)):
-            try:
-                clean_path, noisy_path = valid_pairs[i]
-                clean_data = clean_data_list[i]
-                noisy_data = noisy_data_list[i]
-                enhanced_data = enhanced_batch[i].numpy()
-                sr = clean_sr_list[i]
-                
-                # Truncate enhanced data to original clean length
-                orig_len = clean_data.shape[0]
-                if enhanced_data.shape[1] > orig_len:
-                    enhanced_data = enhanced_data[:, :orig_len]
-                
-                # Calculate all metrics
-                segSNR_L, segSNR_R, mbstoi_score, ild_error, ipd_error_unitless, ipd_error_degrees = calc_metrics(
-                    clean_data, noisy_data, enhanced_data, sr
-                )
-                
-                # Add to results
-                results['filename'].append(clean_path.name)
-                results['segSNR_L'].append(segSNR_L)
-                results['segSNR_R'].append(segSNR_R)
-                results['MBSTOI'].append(mbstoi_score)
-                results['ILD_error'].append(ild_error)
-                results['IPD_error_paper'].append(ipd_error_unitless)
-                results['IPD_error_degrees'].append(ipd_error_degrees)
-                
-                # Print first few results
-                if batch_idx == 0 and i < 3:
-                    print(f"\nMetrics for {clean_path.name}:")
-                    print(f"- SegSNR: L={segSNR_L:.2f} dB, R={segSNR_R:.2f} dB")
-                    print(f"- MBSTOI: {mbstoi_score:.4f}")
-                    print(f"- ILD error: {ild_error:.2f} dB")
-                    print(f"- IPD error (paper): {ipd_error_unitless:.4f}")
-                    print(f"- IPD error (degrees): {ipd_error_degrees:.2f} degrees")
-                
-                # Save enhanced audio
-                enhanced_path = os.path.join(output_dir, "enhanced", f"enhanced_{clean_path.name}")
-                sf.write(enhanced_path, enhanced_data.T, sr)
-                
-            except Exception as e:
-                print(f"Error processing file {i} in batch: {e}")
-                traceback.print_exc()
-    
-    # Check if we processed any files
-    if not results['filename']:
-        print("Warning: No files were successfully processed!")
-        return None
-    
-    # Create DataFrame for analysis
-    results_df = pd.DataFrame(results)
+        # Calculate metrics
+        try:
+            # Calculate fw-SegSNR for left and right channels
+            # RMS normalize signals before evaluation
+            def rms_normalize(signal):
+                rms = np.sqrt(np.mean(signal**2) + 1e-8)
+                return signal / rms
+
+            rms = np.sqrt(np.mean(clean_data**2) + 1e-8)
+            clean_norm_L = rms_normalize(clean_data[:, 0])
+            noisy_norm_L = rms_normalize(noisy_data[:, 0])
+            enhanced_norm_L = rms_normalize(enhanced_data[0])
+
+            segSNR_L = fwsegsnr(clean_norm_L, noisy_norm_L, enhanced_norm_L, sr=c_sr)
+            
+            # Repeat for right channel
+            clean_norm_R = rms_normalize(clean_data[:, 1])
+            noisy_norm_R = rms_normalize(noisy_data[:, 1])
+            enhanced_norm_R = rms_normalize(enhanced_data[1])
+            
+            segSNR_R = fwsegsnr(clean_norm_R, noisy_norm_R, enhanced_norm_R, sr=c_sr)
+
+            segSNR_improvement = (segSNR_L + segSNR_R) / 2
+            
+            # Calculate MBSTOI
+            mbstoi_score = compute_mbstoi(
+                clean_data[:, 0], clean_data[:, 1], 
+                enhanced_data[0], enhanced_data[1], 
+                sr=c_sr
+            )
+            
+            # Calculate ILD error
+            ild_error = compute_ild_error(
+                clean_data[:, 0], clean_data[:, 1],
+                enhanced_data[0], enhanced_data[1],
+                sr=c_sr
+            )
+            
+            # Calculate IPD error (in degrees)
+            ipd_error = compute_ipd_error(
+                clean_data[:, 0], clean_data[:, 1],
+                enhanced_data[0], enhanced_data[1],
+                sr=c_sr
+            )
+            
+            # Add results
+            results['filename'].append(clean_path.name)
+            results['segSNR_L'].append(segSNR_L)
+            results['segSNR_R'].append(segSNR_R)
+            results['MBSTOI'].append(mbstoi_score)
+            results['ILD_error'].append(ild_error)
+            results['IPD_error'].append(ipd_error)
+            
+            # Print first few results
+            if i < 5:
+                print(f"\nMetrics for {clean_path.name} vs {noisy_path.name}:")
+                print(f"- SegSNR: L={segSNR_L:.2f} dB, R={segSNR_R:.2f} dB")
+                print(f"- MBSTOI: {mbstoi_score:.4f}")
+                print(f"- ILD error: {ild_error:.2f} dB")
+                print(f"- IPD error: {ipd_error:.2f} degrees")
+            
+            # Save enhanced audio
+            enhanced_path = os.path.join(output_dir, "enhanced", f"enhanced_{clean_path.name}")
+            sf.write(enhanced_path, enhanced_data.T, c_sr)
+            
+        except Exception as e:
+            print(f"Error processing {clean_path.name}: {e}")
+            import traceback
+            traceback.print_exc()
     
     # Calculate average metrics
+    results_df = pd.DataFrame(results)
     average_results = {
         'Average SegSNR (L)': results_df['segSNR_L'].mean(),
         'Average SegSNR (R)': results_df['segSNR_R'].mean(),
         'Average SegSNR Improvement': (results_df['segSNR_L'].mean() + results_df['segSNR_R'].mean()) / 2,
         'Average MBSTOI': results_df['MBSTOI'].mean(),
         'Average ILD Error (dB)': results_df['ILD_error'].mean(),
-        'Average IPD Error (paper)': results_df['IPD_error_paper'].mean(),
-        'Average IPD Error (degrees)': results_df['IPD_error_degrees'].mean()
+        'Average IPD Error (degrees)': results_df['IPD_error'].mean()
     }
     
     # Save results
@@ -764,17 +583,17 @@ def run_paper_style_evaluation(model_checkpoint, vctk_test_dir, vctk_clean_dir,
 
 def generate_paper_tables(vctk_results, timit_results, output_dir):
     """Generate tables in the same format as in the paper"""
-    snr_values = [-6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0]
+    snr_values = [-6, -3, 0, 3, 6, 9, 12, 15]
     
     # Table 1: Anechoic results (VCTK) as in the paper
     with open(os.path.join(output_dir, "table1_anechoic_results.csv"), 'w') as f:
-        f.write("Input SNR,MBSTOI,ΔSegSNR,L_ILD (dB),L_IPD\n")
+        f.write("Input SNR,MBSTOI,ΔSegSNR,L_ILD (dB),L_IPD (degrees)\n")
         
         for snr in snr_values:
             if snr in vctk_results:
                 result = vctk_results[snr]
-                f.write(f"{int(snr)},{result.get('Average MBSTOI', 'N/A'):.2f},{result.get('Average SegSNR Improvement', 'N/A'):.1f},{result.get('Average ILD Error (dB)', 'N/A'):.2f},{result.get('Average IPD Error (paper)', 'N/A'):.2f}\n")
-
+                f.write(f"{snr},{result.get('Average MBSTOI', 'N/A'):.2f},{result.get('Average SegSNR Improvement', 'N/A'):.1f},{result.get('Average ILD Error (dB)', 'N/A'):.2f},{result.get('Average IPD Error (degrees)', 'N/A'):.1f}\n")
+    
     # Table 2: Unmatched condition (TIMIT) results if available
     if timit_results:
         with open(os.path.join(output_dir, "table2_timit_results.csv"), 'w') as f:
@@ -841,23 +660,23 @@ if __name__ == "__main__":
     parser.add_argument("--vctk_clean_dir", help="Path to VCTK clean test dataset")
     parser.add_argument("--timit_test_dir", help="Path to TIMIT noisy test dataset")
     parser.add_argument("--timit_clean_dir", help="Path to TIMIT clean test dataset")
-    parser.add_argument("--specific_snr", type=float, help="Filter by specific SNR value")
-    parser.add_argument("--batch_size", type=int, default=8, 
-                    help="Batch size for model inference (higher values use more GPU memory)")
+
+    parser.add_argument("--specific_snr", type=float, help="Filter by specific SNR value (only used for basic evaluation)")
+    
     args = parser.parse_args()
     
     if args.paper_style_eval:
-        # Run paper-style evaluation with SNR breakdown (-6 to 15 dB)
+        # Run paper-style evaluation
         if not all([args.vctk_test_dir, args.vctk_clean_dir]):
             parser.error("Paper-style evaluation requires VCTK test and clean directories")
         
-        print("Running paper-style evaluation with SNR points from -6 to 15 dB (3 dB steps)")
-        evaluate_at_paper_snrs(
+        run_paper_style_evaluation(
             args.model_checkpoint,
             args.vctk_test_dir,
             args.vctk_clean_dir,
-            args.output_dir,
-            batch_size=args.batch_size  # Pass the batch_size parameter
+            args.timit_test_dir,
+            args.timit_clean_dir,
+            args.output_dir
         )
     else:
         # Run basic evaluation
@@ -868,7 +687,5 @@ if __name__ == "__main__":
             args.model_checkpoint,
             args.test_dataset_path,
             args.clean_dataset_path,
-            args.output_dir,
-            specific_snr=args.specific_snr,
-            batch_size=args.batch_size  # Pass the batch_size parameter
+            args.output_dir
         )

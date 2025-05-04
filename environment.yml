@@ -1,0 +1,24 @@
+name: bcctn_test
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch=2.2.0
+  - pytorch-cuda=12.4  # Updated to match your system's CUDA version
+  - torchaudio=2.2.0
+  - numpy=1.22.3
+  - scipy=1.7.3
+  - matplotlib=3.5.1
+  - pandas
+  - hydra-core=1.3.2
+  - omegaconf=2.3.0
+  - tqdm
+  - librosa=0.8.1
+  - pip
+  - pip:
+    - torch-stoi==0.1.2
+    - pytorch_lightning==1.9.0
+    - soundfile  # Move soundfile to pip install
