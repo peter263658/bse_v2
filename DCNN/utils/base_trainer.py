@@ -15,10 +15,15 @@ SAVE_DIR = "logs/"
 
 
 class BaseTrainer(pl.Trainer):
-    def __init__(self, lightning_module, n_epochs,
-                 use_checkpoint_callback=True, checkpoint_path=None,
-                 early_stopping_config=None,strategy="ddp_notebook",
-                 accelerator='None', profiler='advanced'):
+    def __init__(self,
+                 lightning_module,
+                 n_epochs,
+                 use_checkpoint_callback=True,
+                 checkpoint_path=None,
+                 early_stopping_config=None,
+                 strategy=None,              # ← 預設 None
+                 accelerator=None,           # ← 也是 None
+                 profiler='advanced'):
 
         gpu_count = torch.cuda.device_count()
 
@@ -28,7 +33,8 @@ class BaseTrainer(pl.Trainer):
         #     accelerator = "auto" 
 
 
-        strategy = strategy if gpu_count > 1 else None
+        # strategy = strategy if gpu_count > 1 else None
+        strategy = strategy if gpu_count > 1 else "auto"
 
         progress_bar = CustomProgressBar()
         early_stopping = EarlyStopping(early_stopping_config["key_to_monitor"],
@@ -48,16 +54,32 @@ class BaseTrainer(pl.Trainer):
         if use_checkpoint_callback:
             callbacks.append(checkpoint_callback)
 
-        super().__init__(
+        # super().__init__(
+        #     max_epochs=n_epochs,
+        #     callbacks=[progress_bar,
+        #                checkpoint_callback  # feature_map_callback
+        #                ],
+        #     logger=[tb_logger], # csv_logger],
+        #     accelerator=accelerator,
+        #     strategy=strategy,
+        #     devices=gpu_count if gpu_count > 0 else None,
+        #     log_every_n_steps=400, enable_progress_bar=True, detect_anomaly=False)
+        trainer_kwargs = dict(
             max_epochs=n_epochs,
-            callbacks=[progress_bar,
-                       checkpoint_callback  # feature_map_callback
-                       ],
-            logger=[tb_logger], # csv_logger],
-            accelerator=accelerator,
-            strategy=strategy,
-            gpus=gpu_count,
-            log_every_n_steps=400, enable_progress_bar=True, detect_anomaly=False)
+            callbacks=[progress_bar, checkpoint_callback],
+            logger=[tb_logger],
+            accelerator=accelerator or ("gpu" if torch.cuda.is_available() else "cpu"),
+            devices=max(1, gpu_count),
+            log_every_n_steps=400,
+            enable_progress_bar=True,
+            detect_anomaly=False,
+            profiler=profiler,
+        )
+        # 多 GPU 才需要 strategy；單 GPU 交給 Lightning 內部判定
+        if gpu_count > 1:
+            trainer_kwargs["strategy"] = strategy
+
+        super().__init__(**trainer_kwargs)
 
         if checkpoint_path is not None:
             _load_checkpoint(lightning_module.model, checkpoint_path)

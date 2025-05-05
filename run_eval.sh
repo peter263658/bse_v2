@@ -1,23 +1,34 @@
 #!/bin/bash
 
 # Set paths
-MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/DCNN/Checkpoints/Trained_model.ckpt"    # Path to trained model
-VCTK_TEST="/raid/R12K41024/BCCTN/Dataset/noisy_testset"                         # Path to VCTK noisy test set
-VCTK_CLEAN="/raid/R12K41024/BCCTN/Dataset/clean_testset"                        # Path to VCTK clean test set
-TIMIT_TEST="/raid/R12K41024/BCCTN/Dataset/noisy_testset_timit"                  # Path to TIMIT noisy test set
-TIMIT_CLEAN="/raid/R12K41024/BCCTN/Dataset/clean_testset_timit"                 # Path to TIMIT clean test set
-RESULTS_DIR="./results"                                                         # Directory to save results
+MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/DCNN/Checkpoints/Trained_model.ckpt"
+VCTK_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset"
+VCTK_CLEAN_DIR="/raid/R12K41024/BCCTN/Dataset/clean_testset"
+TIMIT_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset_timit"
+TIMIT_CLEAN_DIR="/raid/R12K41024/BCCTN/Dataset/clean_testset_timit"
+OUTPUT_DIR="./results_May04"  # Define output directory
 
 # Create results directory
-mkdir -p $RESULTS_DIR
+mkdir -p "$OUTPUT_DIR"
 
-# Run paper-style evaluation (with SNR-specific results)
-CUDA_VISIBLE_DEVICES=5  python eval.py \
-    --model_checkpoint $MODEL_CHECKPOINT \
-    --vctk_test_dir $VCTK_TEST \
-    --vctk_clean_dir $VCTK_CLEAN \
-    --timit_test_dir $TIMIT_TEST \
-    --timit_clean_dir $TIMIT_CLEAN \
-    --output_dir $RESULTS_DIR/paper_style_eval \
+# Step 1: Run paper-style evaluation with fixed SNR levels on VCTK dataset (matched condition)
+echo "Running paper-style evaluation on VCTK dataset (matched condition)..."
+CUDA_VISIBLE_DEVICES=7 python eval.py \
+    --model_checkpoint "$MODEL_CHECKPOINT" \
+    --vctk_test_dir "$VCTK_NOISY_DIR" \
+    --vctk_clean_dir "$VCTK_CLEAN_DIR" \
+    --timit_test_dir "$TIMIT_NOISY_DIR" \
+    --timit_clean_dir "$TIMIT_CLEAN_DIR" \
+    --output_dir "${OUTPUT_DIR}/vctk_paper_style" \
     --paper_style_eval \
-    --batch_size 8
+    --batch_size 8 \
+    --limit_pairs 20
+
+# Step 3: Generate comparison table between our results and paper results
+echo "Generating comparison table..."
+CUDA_VISIBLE_DEVICES=7 python compare_results.py \
+    --vctk_results "${OUTPUT_DIR}/vctk_paper_style/paper_style_results.csv" \
+    --timit_results "${OUTPUT_DIR}/timit_paper_style/paper_style_results.csv" \
+    --output_file "${OUTPUT_DIR}/comparison_with_paper.csv"
+
+echo "Evaluation complete! Results are saved in ${OUTPUT_DIR}"

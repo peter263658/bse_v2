@@ -49,6 +49,7 @@ def benchmark_model(model_checkpoint, input_file, output_dir, num_runs=5, force_
     print("Loading model...")
     model = DCNNLightningModule(config)
     model.eval()
+    print(model)
     
     # Load checkpoint
     checkpoint = torch.load(model_checkpoint, map_location=device)
@@ -166,3 +167,32 @@ if __name__ == "__main__":
         num_runs=args.num_runs,
         force_cpu=not args.use_gpu
     )
+
+
+
+import platform
+import psutil
+import os
+
+def print_system_info():
+    print("="*40, "System Information", "="*40)
+    print(f"Processor: {platform.processor()}")
+    print(f"Machine: {platform.machine()}")
+    print(f"Platform: {platform.system()} {platform.release()}")
+    print(f"CPU Cores (Logical): {psutil.cpu_count(logical=True)}")
+    print(f"CPU Cores (Physical): {psutil.cpu_count(logical=False)}")
+    print(f"RAM: {round(psutil.virtual_memory().total / (1024**3), 2)} GB")
+    print("="*100)
+
+print_system_info()
+
+def get_cpu_model():
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if "model name" in line:
+                    return line.strip().split(":")[1]
+    except:
+        return platform.processor()
+
+print(f"Processor: {get_cpu_model()}")

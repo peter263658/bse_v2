@@ -1,41 +1,81 @@
-import os
-import argparse
-import torch
-# import torchaudio
+"""
+Fixes for Binaural Speech Enhancement Evaluation
+================================================
+
+This module contains updated functions to fix the evaluation issues
+and make results comparable to the paper:
+"Binaural Speech Enhancement using Deep Complex Convolutional Transformer Networks"
+"""
+
 import numpy as np
-# import matplotlib.pyplot as plt
-from pathlib import Path
-import pandas as pd
 import librosa
 import soundfile as sf
-from tqdm import tqdm
-from hydra import compose, initialize
-from hydra.core.global_hydra import GlobalHydra
+import torch
+from pathlib import Path
 import re
-
-# Import custom modules
-from DCNN.datasets.test_dataset import BaseDataset
-from DCNN.trainer import DCNNLightningModule
+import os
+from tqdm import tqdm
 
 
+# 1. STFT parameters - ensure consistency throughout
+SAMPLE_RATE = 16000
+FFT_SIZE = 512
+WIN_LENGTH = 400  # 25ms at 16kHz
+HOP_LENGTH = 100  # 6.25ms at 16kHz
 
-def fwsegsnr(clean, noisy, enh, sr=16_000):
+
+# 2. Signal preparation for evaluation
+def prepare_signals(clean, enhanced, target_sr=SAMPLE_RATE):
+    """
+    Prepare clean and enhanced signals to have the same length and sampling rate
+    
+    Args:
+        clean: Clean reference signal (numpy array)
+        enhanced: Enhanced signal (numpy array)
+        target_sr: Target sampling rate
+        
+    Returns:
+        Prepared clean and enhanced signals
+    """
+    # Ensure same length
+    min_len = min(len(clean), len(enhanced))
+    if len(clean) > min_len:
+        clean = clean[:min_len]
+    elif len(enhanced) > min_len:
+        enhanced = enhanced[:min_len]
+    
+    # Ensure minimum length for STFT processing
+    min_required = WIN_LENGTH + HOP_LENGTH * 10  # At least 10 frames
+    if min_len < min_required:
+        pad_length = min_required - min_len
+        clean = np.pad(clean, (0, pad_length))
+        enhanced = np.pad(enhanced, (0, pad_length))
+    
+    # Energy normalization for fair comparison
+    clean = clean / (np.sqrt(np.mean(clean**2)) + 1e-8)
+    enhanced = enhanced / (np.sqrt(np.mean(enhanced**2)) + 1e-8)
+    
+    return clean, enhanced
+
+
+# 3. Updated frequency-weighted Segmental SNR
+def fwsegsnr(clean, noisy, enhanced, sr=SAMPLE_RATE):
     """
     Compute frequency-weighted Segmental SNR improvement following VOICEBOX implementation
     
     Args:
         clean: Clean reference signal
         noisy: Noisy signal
-        enh: Enhanced signal
+        enhanced: Enhanced signal
         sr: Sample rate
         
     Returns:
         SNR improvement in dB (positive means enhancement is better than noisy)
     """
-    # Frame parameters (25ms window, 6.25ms hop at 16kHz)
-    frame = 400          # 25 ms
-    hop = 100            # 6.25 ms
-    fft_size = 512
+    # Frame parameters
+    frame = WIN_LENGTH
+    hop = HOP_LENGTH
+    fft_size = FFT_SIZE
     
     # Bark critical-band weights (as used in VOICEBOX)
     W = np.array([
@@ -57,7 +97,7 @@ def fwsegsnr(clean, noisy, enh, sr=16_000):
     # Fix for zero-width bands
     valid = np.where(np.diff(edges_bin) > 0)[0]          # Find bands with non-zero width
     edges_bin = edges_bin[np.r_[valid, valid[-1]+1]]     # Keep only valid band edges
-    W_valid = W[valid] / W[valid].sum()                  # Renormalize weights
+    W_valid = W[valid] / np.sum(W[valid])                  # Renormalize weights
     
     # Create windows and frame the signals
     win = np.hanning(frame)
@@ -72,7 +112,7 @@ def fwsegsnr(clean, noisy, enh, sr=16_000):
     # Frame signals and compute FFT
     C_frames = _frames(clean)
     N_frames = _frames(noisy - clean)  # Noise component
-    E_frames = _frames(enh - clean)    # Enhanced error component
+    E_frames = _frames(enhanced - clean)    # Enhanced error component
     
     # Apply FFT
     C_fft = np.fft.rfft(C_frames, fft_size, axis=1)
@@ -92,15 +132,14 @@ def fwsegsnr(clean, noisy, enh, sr=16_000):
     P_noisy = _band_pow(N_fft)
     P_enh = _band_pow(E_fft)
     
-    # VOICEBOX approach: calculate SNR per band in dB, then apply weights
+    # Calculate SNR per band in dB, then apply weights
     def _band_snr(P_sig, P_noise):
         snr_band = 10 * np.log10(P_sig / P_noise)
         snr_band = np.clip(snr_band, -10, 35)  # Clip to [-10, 35] dB range
-        # Apply weights after calculating SNR in dB
         return np.sum(snr_band * W_valid[None, :], axis=1) / np.sum(W_valid)
     
     # Calculate frame energies to identify active speech frames
-    frame_energy = 10 * np.log10(np.sum(P_clean, axis=1))
+    frame_energy = 10 * np.log10(np.sum(P_clean, axis=1) + 1e-10)
     active_frames = frame_energy > (np.max(frame_energy) - 40)  # Frames within 40dB of max
     
     # Calculate SNR for each frame, only for active frames
@@ -114,17 +153,113 @@ def fwsegsnr(clean, noisy, enh, sr=16_000):
     return np.mean(snr_enh) - np.mean(snr_noisy)
 
 
-
-def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
+def get_absolute_segsnr(clean, signal, sr=SAMPLE_RATE):
     """
-    Compute ILD error between clean and enhanced binaural signals with improved
-    handling of zero/small values
+    Compute absolute frequency-weighted Segmental SNR for any signal
+    
+    Args:
+        clean: Clean reference signal
+        signal: Signal to evaluate (noisy or enhanced)
+        sr: Sample rate
+        
+    Returns:
+        Absolute SNR in dB
+    """
+    # Frame parameters
+    frame = WIN_LENGTH
+    hop = HOP_LENGTH
+    fft_size = FFT_SIZE
+    
+    # Bark critical-band weights (as used in VOICEBOX)
+    W = np.array([
+        0.13, 0.26, 0.42, 0.60, 0.78, 0.93, 1.00, 0.97, 0.89,
+        0.76, 0.62, 0.50, 0.38, 0.28, 0.22, 0.18, 0.14, 0.11,
+        0.09, 0.07, 0.06, 0.05, 0.04
+    ])
+    
+    # Critical band edges in Hz for 16kHz sampling rate
+    band_edges_hz = np.array([
+        0, 100, 200, 300, 400, 510, 630, 770, 920, 1080, 1270, 1480, 1720,
+        2000, 2320, 2700, 3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000
+    ])
+    
+    # Convert to FFT bin indices with correct handling for high frequencies
+    edges_bin = np.round(band_edges_hz * fft_size / sr).astype(int)
+    edges_bin = np.minimum(edges_bin, fft_size//2 + 1)  # Cap at Nyquist
+    
+    # Fix for zero-width bands
+    valid = np.where(np.diff(edges_bin) > 0)[0]          # Find bands with non-zero width
+    edges_bin = edges_bin[np.r_[valid, valid[-1]+1]]     # Keep only valid band edges
+    W_valid = W[valid] / np.sum(W[valid])                  # Renormalize weights
+    
+    # Create windows and frame the signals
+    win = np.hanning(frame)
+    
+    def _frames(x):
+        if len(x) < frame:
+            x = np.pad(x, (0, frame-len(x)))
+        # Create frame indices
+        idx = np.arange(frame)[None, :] + hop*np.arange((len(x)-frame)//hop+1)[:, None]
+        return x[idx] * win
+    
+    # Frame signals and compute FFT
+    C_frames = _frames(clean)
+    S_frames = _frames(signal - clean)  # Signal error component
+    
+    # Apply FFT
+    C_fft = np.fft.rfft(C_frames, fft_size, axis=1)
+    S_fft = np.fft.rfft(S_frames, fft_size, axis=1)
+    
+    # Compute band powers for each frame
+    def _band_pow(X_fft):
+        P = np.zeros((X_fft.shape[0], len(valid)))
+        for b in range(len(valid)):
+            lo, hi = edges_bin[b], edges_bin[b+1]
+            P[:, b] = np.sum(np.abs(X_fft[:, lo:hi])**2, axis=1)
+        return P + 1e-10  # Avoid division by zero
+    
+    # Calculate powers in each band
+    P_clean = _band_pow(C_fft)
+    P_signal = _band_pow(S_fft)
+    
+    # Calculate SNR per band in dB, then apply weights
+    def _band_snr(P_sig, P_noise):
+        snr_band = 10 * np.log10(P_sig / P_noise)
+        snr_band = np.clip(snr_band, -10, 35)  # Clip to [-10, 35] dB range
+        return np.sum(snr_band * W_valid[None, :], axis=1) / np.sum(W_valid)
+    
+    # Calculate frame energies to identify active speech frames
+    frame_energy = 10 * np.log10(np.sum(P_clean, axis=1) + 1e-10)
+    active_frames = frame_energy > (np.max(frame_energy) - 40)  # Frames within 40dB of max
+    
+    # Calculate SNR for each frame, only for active frames
+    if not np.any(active_frames):
+        return 0.0  # No active frames
+        
+    snr_signal = _band_snr(P_clean, P_signal)[active_frames]
+    
+    # Return absolute SNR
+    return np.mean(snr_signal)
+
+
+# 4. Updated ILD error calculation with speech activity mask
+def compute_ild_error_with_mask(clean_left, clean_right, enhanced_left, enhanced_right, sr=SAMPLE_RATE):
+    """
+    Compute ILD error between clean and enhanced binaural signals with
+    proper speech activity masking as described in the paper
+    
+    Args:
+        clean_left, clean_right: Clean reference signals
+        enhanced_left, enhanced_right: Enhanced signals
+        sr: Sample rate
+        
+    Returns:
+        ILD error in dB
     """
     # STFT parameters
-    sr_ratio = sr / 16000
-    n_fft = int(512 * sr_ratio)
-    hop_length = int(100 * sr_ratio)
-    win_length = int(400 * sr_ratio)
+    n_fft = FFT_SIZE
+    hop_length = HOP_LENGTH
+    win_length = WIN_LENGTH
     
     # Compute STFTs
     clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
@@ -142,34 +277,23 @@ def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     enhanced_left_mag = np.abs(enhanced_left_stft) + eps
     enhanced_right_mag = np.abs(enhanced_right_stft) + eps
     
-    # Compute ILD in dB (add epsilon to both numerator and denominator)
+    # Compute ILD in dB
     clean_ild = 20 * np.log10(clean_left_mag / clean_right_mag)
     enhanced_ild = 20 * np.log10(enhanced_left_mag / enhanced_right_mag)
     
-    # Create speech activity mask based on both channels (T=20dB as in paper)
+    # Create speech activity mask as in the paper (T=20dB)
     threshold = 20  # dB below max as specified in paper
     
     # Combine energy from both channels for more robust mask
-    combined_energy_left = clean_left_mag**2  # Already added epsilon above
-    combined_energy_right = clean_right_mag**2
-    combined_energy = np.maximum(combined_energy_left, combined_energy_right)
-    
-    # Handle potential zero max energy (unlikely but safer)
+    combined_energy = np.maximum(clean_left_mag**2, clean_right_mag**2)
     max_energy = np.max(combined_energy)
-    if max_energy <= eps:
-        # Return default value if no significant energy
-        return 0.0
-        
-    # Create mask
-    mask = (combined_energy > max_energy * 10**(-threshold/10))
     
-    # Ensure mask has at least some active points
-    if np.sum(mask) == 0:
-        # Alternative: use a less strict threshold
-        mask = (combined_energy > max_energy * 10**(-30/10))
-        # If still no active points, return default
-        if np.sum(mask) == 0:
-            return 0.0
+    # Create Ideal Binary Mask (IBM) as described in the paper's Eq. (13-14)
+    # For each frequency bin, threshold relative to maximum energy in that frequency
+    mask = np.zeros_like(combined_energy, dtype=bool)
+    for k in range(combined_energy.shape[0]):
+        max_energy_k = np.max(combined_energy[k])
+        mask[k] = 20 * np.log10(combined_energy[k]) > (20 * np.log10(max_energy_k) - threshold)
     
     # Compute mean absolute error in active regions
     ild_error = np.abs(clean_ild - enhanced_ild)
@@ -178,134 +302,72 @@ def compute_ild_error(clean_left, clean_right, enhanced_left, enhanced_right, sr
     ild_error = np.nan_to_num(ild_error, nan=0.0, posinf=0.0, neginf=0.0)
     
     # Apply mask and calculate mean
+    active_bins = np.sum(mask)
+    if active_bins == 0:
+        return 0.0  # Return 0 if no active bins
+        
     ild_error_masked = ild_error * mask
-    mean_ild_error = np.sum(ild_error_masked) / np.sum(mask)
+    mean_ild_error = np.sum(ild_error_masked) / active_bins
     
     return mean_ild_error
 
 
-def compute_ipd_error(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
-    """
-    Compute IPD error between clean and enhanced binaural signals in degrees
-    """
-    # STFT parameters
-    sr_ratio = sr / 16000
-    n_fft = int(512 * sr_ratio)
-    hop_length = int(100 * sr_ratio)
-    win_length = int(400 * sr_ratio)
-    
-    # Compute STFTs
-    clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    enhanced_left_stft = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    enhanced_right_stft = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    # Compute IPD
-    eps = 1e-10
-    clean_ipd = np.angle(clean_left_stft * np.conj(clean_right_stft))
-    enhanced_ipd = np.angle(enhanced_left_stft * np.conj(enhanced_right_stft))
-    
-    # Create speech activity mask
-    threshold = 20  # dB below max as specified in paper
-    
-    # Combine energy from both channels
-    combined_energy_left = np.abs(clean_left_stft)**2
-    combined_energy_right = np.abs(clean_right_stft)**2
-    combined_energy = np.maximum(combined_energy_left, combined_energy_right)
-    
-    max_energy = np.max(combined_energy)
-    mask = (combined_energy > max_energy * 10**(-threshold/10))
-    
-    # FIX #2: Adjust frequency mask to focus on 200-1500 Hz where IPD is most meaningful
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-    f_min = 200  # Hz
-    f_max = 1500  # Hz - Changed from 8000 to 1500 Hz as IPD is unreliable above 1.5kHz
-    freq_mask = np.logical_and(freqs >= f_min, freqs <= f_max)
-    freq_mask = freq_mask[:, np.newaxis]  # Reshape for broadcasting
-    combined_mask = np.logical_and(mask, freq_mask)
-    
-    # Handle phase wrapping by taking the smallest angle difference
-    ipd_error = np.abs(np.angle(np.exp(1j * (clean_ipd - enhanced_ipd))))
-    
-    # Convert to degrees (as reported in the paper)
-    ipd_error_degrees = ipd_error * (180 / np.pi)
-    ipd_error_masked = ipd_error_degrees * combined_mask
-    
-    # Return mean over active regions
-    total_active_bins = np.sum(combined_mask) + eps
-    mean_ipd_error = np.sum(ipd_error_masked) / total_active_bins
-    
-    return mean_ipd_error
+# 5. Updated IPD error calculation with speech activity mask
+def compute_ipd_error_with_mask(
+        clean_left, clean_right, enhanced_left, enhanced_right,
+        sr=16000, f_max=1500):
+    n_fft, hop, win = 512, 100, 400
+    cl = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop, win_length=win)
+    cr = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop, win_length=win)
+    el = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop, win_length=win)
+    er = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop, win_length=win)
 
-def compute_ipd_error_paper_style(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
-    """
-    Compute IPD error following the paper's Equation 11 approach with amplitude weighting
-    """
-    # STFT parameters
-    sr_ratio = sr / 16000
-    n_fft = int(512 * sr_ratio)
-    hop_length = int(100 * sr_ratio)
-    win_length = int(400 * sr_ratio)
-    
-    # Compute STFTs
-    clean_left_stft = librosa.stft(clean_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    clean_right_stft = librosa.stft(clean_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    enhanced_left_stft = librosa.stft(enhanced_left, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    enhanced_right_stft = librosa.stft(enhanced_right, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-    
-    # Epsilon for numerical stability
     eps = 1e-8
-    
-    # Compute magnitudes
-    clean_left_mag = np.abs(clean_left_stft) + eps
-    clean_right_mag = np.abs(clean_right_stft) + eps
-    
-    # Calculate joint energy mask for focusing on speech-active regions (T=20dB as in paper)
-    threshold = 20  # dB below max
-    combined_energy = np.maximum(clean_left_mag**2, clean_right_mag**2)
-    max_energy = np.max(combined_energy)
-    mask = (combined_energy > max_energy * 10**(-threshold/10))
-    
-    # Compute IPD values (unwrapped phase differences)
-    clean_ipd = np.angle(clean_left_stft * np.conj(clean_right_stft))
-    enhanced_ipd = np.angle(enhanced_left_stft * np.conj(enhanced_right_stft))
-    
-    # Handle phase wrapping by taking the angular difference on the unit circle
-    ipd_error = np.abs(np.angle(np.exp(1j * (clean_ipd - enhanced_ipd))))
-    
-    # Following Eq.(11): Weight by clean amplitude (|X_L|+|X_R|)
-    weight = clean_left_mag + clean_right_mag
-    ipd_error_weighted = ipd_error * mask * weight
-    
-    # Return unitless value (not in degrees) as per paper
-    if np.sum(mask * weight) > 0:
-        mean_ipd_error = np.sum(ipd_error_weighted) / np.sum(mask * weight)
-    else:
-        mean_ipd_error = 0.0
-        
-    return mean_ipd_error
+    mag_cl = np.abs(cl) + eps
+    mag_cr = np.abs(cr) + eps
+    energy = np.maximum(mag_cl**2, mag_cr**2)
 
-def safe_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000):
+    # Speech‑active IBM (T = 20 dB)
+    max_per_band = energy.max(axis=1, keepdims=True)
+    mask = 20*np.log10(energy) > 20*np.log10(max_per_band) - 20
+
+    # Limit to ≤ f_max
+    max_bin = int(f_max / (sr / n_fft))
+    mask = mask[:max_bin+1]
+    ipd_clean = np.angle(cl * np.conj(cr))[:max_bin+1]
+    ipd_enh   = np.angle(el * np.conj(er))[:max_bin+1]
+
+    ipd_err = np.abs(np.angle(np.exp(1j*(ipd_clean - ipd_enh))))
+    if not mask.any():
+        return 0.0
+    return (ipd_err[mask]).mean()
+
+
+# 6. Safe MBSTOI calculation
+def safe_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=SAMPLE_RATE):
     """
-    Compute MBSTOI with proper error handling and padding to avoid dimension issues
+    Compute MBSTOI with proper error handling and signal preparation
+    
+    Args:
+        clean_left, clean_right: Clean reference signals
+        enhanced_left, enhanced_right: Enhanced signals
+        sr: Sample rate
+        
+    Returns:
+        MBSTOI score or None if calculation fails
     """
     import math
     
     # Ensure minimum length and make divisible by 256 (STOI requirement)
     min_len = min(len(clean_left), len(clean_right), len(enhanced_left), len(enhanced_right))
     
-    # Make target length at least 4096 (16 frames of 256 samples) and always a multiple of 256
+    # Make target length at least 4096 (16 frames of 256 samples) and a multiple of 256
     target_len = max(4096, 256 * math.ceil(min_len / 256))
     
     # Trim and pad all signals to exactly the same length
     def prepare_signal(signal):
-        # Create a copy to avoid modifying the original
         signal = signal.copy()
-        # Trim to common length
         signal = signal[:min_len]
-        # Pad if needed to reach target length
         if len(signal) < target_len:
             signal = np.pad(signal, (0, target_len - len(signal)))
         return signal
@@ -316,104 +378,281 @@ def safe_mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, sr=16000
     enhanced_right = prepare_signal(enhanced_right)
     
     # Normalize signals to prevent negative MBSTOI values
-    for i, s in enumerate([clean_left, clean_right, enhanced_left, enhanced_right]):
+    for s in [clean_left, clean_right, enhanced_left, enhanced_right]:
         s -= np.mean(s)
         max_val = np.max(np.abs(s))
-        if max_val > 0:  # Avoid division by zero
+        if max_val > 0:
             s /= max_val
     
     try:
         from MBSTOI.mbstoi import mbstoi
+        # Use fixed gridcoarseness=1 as in the paper
         score = mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, gridcoarseness=1)
         
         # Validate result
         if np.isnan(score) or np.isinf(score) or score < 0 or score > 1:
-            print(f"Warning: Invalid MBSTOI score: {score}. Recalculating with safer settings.")
-            # Try with coarser grid if the calculation failed
-            score = mbstoi(clean_left, clean_right, enhanced_left, enhanced_right, gridcoarseness=2)
-            
-            # Second validation
-            if np.isnan(score) or np.isinf(score) or score < 0 or score > 1:
-                print(f"Warning: Still invalid MBSTOI score: {score}. Returning estimated value.")
-                # Estimate based on channel correlations (better than fixed 0.75)
-                cl_corr = np.corrcoef(clean_left, enhanced_left)[0,1]
-                cr_corr = np.corrcoef(clean_right, enhanced_right)[0,1]
-                return max(0.5, min(0.98, (cl_corr + cr_corr) / 2))
+            print(f"Warning: Invalid MBSTOI score: {score}. Returning None.")
+            return None
         
         return score
-        
     except Exception as e:
         print(f"Error in MBSTOI calculation: {e}")
-        # More intelligent fallback using correlation
-        try:
-            cl_corr = np.corrcoef(clean_left, enhanced_left)[0,1]
-            cr_corr = np.corrcoef(clean_right, enhanced_right)[0,1]
-            est_score = max(0.5, min(0.98, (cl_corr + cr_corr) / 2))
-            print(f"Estimating MBSTOI using signal correlation: {est_score:.4f}")
-            return est_score
-        except:
-            print("Correlation estimation failed. Using default value.")
-            return 0.85  # Better default based on your dataset averages
+        return None
 
-def evaluate_at_paper_snrs(model_checkpoint, test_dir, clean_dir, output_dir, batch_size=8):
-    paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
-    results_by_snr = {}
+
+# 7. Safe PESQ calculation for binaural signals
+def safe_pesq(clean_left, clean_right, processed_left, processed_right, sr=SAMPLE_RATE):
+    """
+    Compute PESQ for binaural signals (average of left and right channels)
     
-    for snr in paper_snrs:
-        print(f"\n===== Evaluating at SNR = {snr} dB =====")
-        snr_output_dir = os.path.join(output_dir, f"paper_snr_{snr}dB")
+    Args:
+        clean_left, clean_right: Clean reference signals
+        processed_left, processed_right: Processed signals (noisy or enhanced)
+        sr: Sample rate
         
-        # Pass batch_size parameter
-        snr_results = evaluate_model(
-            model_checkpoint,
-            test_dir,
-            clean_dir,
-            snr_output_dir,
-            specific_snr=snr,
-            batch_size=batch_size  # Pass the batch_size parameter
+    Returns:
+        PESQ score or None if calculation fails
+    """
+    try:
+        # Try to import pesq
+        from pesq import pesq
+        
+        # PESQ requires 16kHz or 8kHz
+        if sr != 16000 and sr != 8000:
+            # Resample to 16kHz
+            clean_left = librosa.resample(clean_left, orig_sr=sr, target_sr=16000)
+            clean_right = librosa.resample(clean_right, orig_sr=sr, target_sr=16000)
+            processed_left = librosa.resample(processed_left, orig_sr=sr, target_sr=16000)
+            processed_right = librosa.resample(processed_right, orig_sr=sr, target_sr=16000)
+            sr = 16000
+        
+        # Calculate PESQ for left and right channels
+        try:
+            pesq_left = pesq(sr, clean_left, processed_left, 'wb')
+        except Exception as e:
+            print(f"Error calculating PESQ for left channel: {e}")
+            pesq_left = float('nan')
+            
+        try:
+            pesq_right = pesq(sr, clean_right, processed_right, 'wb')
+        except Exception as e:
+            print(f"Error calculating PESQ for right channel: {e}")
+            pesq_right = float('nan')
+        
+        # Return the average PESQ if at least one channel succeeded
+        if not np.isnan(pesq_left) or not np.isnan(pesq_right):
+            valid_scores = [score for score in [pesq_left, pesq_right] if not np.isnan(score)]
+            return np.mean(valid_scores)
+        else:
+            return None
+            
+    except ImportError:
+        print("PESQ calculation skipped: pesq package not installed. Install with 'pip install pesq'.")
+        return None
+    except Exception as e:
+        print(f"Error in PESQ calculation: {e}")
+        return None
+
+
+# 8. Safe evaluation function that handles errors properly
+def safe_evaluate_file(clean_path, noisy_path, model, device):
+    """
+    Safely evaluate a single file pair with proper error handling
+    
+    Args:
+        clean_path: Path to clean reference file
+        noisy_path: Path to noisy file
+        model: Pytorch model
+        device: Device to run model on
+        
+    Returns:
+        Dictionary of evaluation metrics or None if evaluation fails
+    """
+    try:
+        # Load files
+        clean_data, c_sr = sf.read(clean_path)
+        noisy_data, n_sr = sf.read(noisy_path)
+        
+        # Skip mono files
+        if len(clean_data.shape) == 1 or len(noisy_data.shape) == 1:
+            print(f"Skipping {clean_path.name}: mono file detected")
+            return None
+            
+        # Skip if too short
+        if len(clean_data) / c_sr < 0.3:  # Less than 300ms
+            print(f"Skipping {clean_path.name}: too short ({len(clean_data) / c_sr:.2f}s)")
+            return None
+            
+        # Check for silence
+        clean_rms_l = np.sqrt(np.mean(clean_data[:, 0]**2))
+        clean_rms_r = np.sqrt(np.mean(clean_data[:, 1]**2))
+        if clean_rms_l < 0.001 or clean_rms_r < 0.001:  # -60 dBFS threshold
+            print(f"Skipping {clean_path.name}: too quiet (RMS_L={20*np.log10(clean_rms_l+1e-10):.1f} dBFS, RMS_R={20*np.log10(clean_rms_r+1e-10):.1f} dBFS)")
+            return None
+            
+        # Resample if needed
+        if n_sr != c_sr:
+            # Resample each channel separately
+            noisy_data = np.stack([
+                librosa.resample(noisy_data[:, ch], orig_sr=n_sr, target_sr=c_sr) 
+                for ch in range(noisy_data.shape[1])
+            ], axis=1)
+            
+        # Process through model - create batch tensor [1, 2, samples]
+        noisy_tensor = torch.tensor(noisy_data.T, dtype=torch.float32).unsqueeze(0).to(device)
+        
+        # Run through model
+        with torch.no_grad():
+            enhanced_tensor = model(noisy_tensor)
+            enhanced_data = enhanced_tensor.cpu().numpy()[0]  # [2, samples]
+            
+        # Ensure enhanced data matches the original clean length
+        orig_len = clean_data.shape[0]
+        if enhanced_data.shape[1] > orig_len:
+            enhanced_data = enhanced_data[:, :orig_len]
+        elif enhanced_data.shape[1] < orig_len:
+            pad_width = ((0, 0), (0, orig_len - enhanced_data.shape[1]))
+            enhanced_data = np.pad(enhanced_data, pad_width)
+            
+        # Calculate metrics with proper error handling
+        results = {
+            'filename': clean_path.name
+        }
+        
+        # MBSTOI for both noisy and enhanced signals
+        noisy_mbstoi = safe_mbstoi(
+            clean_data[:, 0], clean_data[:, 1], 
+            noisy_data[:, 0], noisy_data[:, 1], 
+            sr=c_sr
+        )
+        enhanced_mbstoi = safe_mbstoi(
+            clean_data[:, 0], clean_data[:, 1], 
+            enhanced_data[0], enhanced_data[1], 
+            sr=c_sr
         )
         
-        if snr_results:
-            results_by_snr[snr] = snr_results
-
-    
-    # Generate paper-style table
-    with open(os.path.join(output_dir, "paper_style_results.csv"), 'w') as f:
-        f.write("SNR,MBSTOI,ΔSegSNR,LILD,LIPD\n")
+        if noisy_mbstoi is not None:
+            results['MBSTOI_noisy'] = noisy_mbstoi
+        if enhanced_mbstoi is not None:
+            results['MBSTOI'] = enhanced_mbstoi
         
-        for snr in paper_snrs:
-            if snr in results_by_snr:
-                result = results_by_snr[snr]
-                f.write(f"{snr},{result.get('Average MBSTOI', 'N/A'):.4f}," +
-                        f"{result.get('Average SegSNR Improvement', 'N/A'):.2f}," +
-                        f"{result.get('Average ILD Error (dB)', 'N/A'):.4f}," +
-                        f"{result.get('Average IPD Error (paper)', 'N/A'):.4f}\n")
-    
-    # Calculate overall averages (like in the paper)
-    avg_mbstoi = np.mean([r.get('Average MBSTOI', 0) for r in results_by_snr.values()])
-    avg_segsnr = np.mean([r.get('Average SegSNR Improvement', 0) for r in results_by_snr.values()])
-    avg_ild = np.mean([r.get('Average ILD Error (dB)', 0) for r in results_by_snr.values()])
-    avg_ipd = np.mean([r.get('Average IPD Error (paper)', 0) for r in results_by_snr.values()])
-    
-    print("\n===== PAPER STYLE AVERAGES =====")
-    print(f"Average MBSTOI: {avg_mbstoi:.4f}")
-    print(f"Average SegSNR: {avg_segsnr:.2f}")
-    print(f"Average LILD: {avg_ild:.4f}")
-    print(f"Average LIPD: {avg_ipd:.4f}")
-    
-    with open(os.path.join(output_dir, "paper_style_averages.txt"), 'w') as f:
-        f.write(f"Average MBSTOI: {avg_mbstoi:.4f}\n")
-        f.write(f"Average SegSNR: {avg_segsnr:.2f}\n")
-        f.write(f"Average LILD: {avg_ild:.4f}\n")
-        f.write(f"Average LIPD: {avg_ipd:.4f}\n")
-    
-    return results_by_snr
+        # PESQ for both noisy and enhanced signals
+        try:
+            noisy_pesq = safe_pesq(
+                clean_data[:, 0], clean_data[:, 1],
+                noisy_data[:, 0], noisy_data[:, 1],
+                sr=c_sr
+            )
+            enhanced_pesq = safe_pesq(
+                clean_data[:, 0], clean_data[:, 1],
+                enhanced_data[0], enhanced_data[1],
+                sr=c_sr
+            )
+            
+            if noisy_pesq is not None:
+                results['PESQ_noisy'] = noisy_pesq
+            if enhanced_pesq is not None:
+                results['PESQ'] = enhanced_pesq
+        except Exception as e:
+            print(f"PESQ calculation failed: {e}")
+            
+        # Segmental SNR for both noisy and enhanced signals
+        try:
+            # Calculate absolute SegSNR for noisy signal
+            noisy_segsnr_l = get_absolute_segsnr(clean_data[:, 0], noisy_data[:, 0], sr=c_sr)
+            noisy_segsnr_r = get_absolute_segsnr(clean_data[:, 1], noisy_data[:, 1], sr=c_sr)
+            results['SegSNR_noisy_L'] = noisy_segsnr_l
+            results['SegSNR_noisy_R'] = noisy_segsnr_r
+            results['SegSNR_noisy_Avg'] = (noisy_segsnr_l + noisy_segsnr_r) / 2
+            
+            # Calculate absolute SegSNR for enhanced signal
+            enhanced_segsnr_l = get_absolute_segsnr(clean_data[:, 0], enhanced_data[0], sr=c_sr)
+            enhanced_segsnr_r = get_absolute_segsnr(clean_data[:, 1], enhanced_data[1], sr=c_sr)
+            results['SegSNR_L'] = enhanced_segsnr_l
+            results['SegSNR_R'] = enhanced_segsnr_r
+            results['SegSNR_Avg'] = (enhanced_segsnr_l + enhanced_segsnr_r) / 2
+            
+            # Calculate SegSNR improvement (for compatibility with paper)
+            segsnr_l = fwsegsnr(clean_data[:, 0], noisy_data[:, 0], enhanced_data[0], sr=c_sr)
+            segsnr_r = fwsegsnr(clean_data[:, 1], noisy_data[:, 1], enhanced_data[1], sr=c_sr)
+            results['SegSNR_impr_L'] = segsnr_l
+            results['SegSNR_impr_R'] = segsnr_r
+            results['SegSNR_impr_Avg'] = (segsnr_l + segsnr_r) / 2
+        except Exception as e:
+            print(f"SegSNR calculation failed: {e}")
+            
+        # ILD error with mask for both noisy and enhanced
+        try:
+            noisy_ild_error = compute_ild_error_with_mask(
+                clean_data[:, 0], clean_data[:, 1],
+                noisy_data[:, 0], noisy_data[:, 1],
+                sr=c_sr
+            )
+            enhanced_ild_error = compute_ild_error_with_mask(
+                clean_data[:, 0], clean_data[:, 1],
+                enhanced_data[0], enhanced_data[1],
+                sr=c_sr
+            )
+            results['ILD_error_noisy'] = noisy_ild_error
+            results['ILD_error'] = enhanced_ild_error
+        except Exception as e:
+            print(f"ILD error calculation failed: {e}")
+            
+        # IPD error with mask for both noisy and enhanced
+        try:
+            noisy_ipd_error = compute_ipd_error_with_mask(
+                clean_data[:, 0], clean_data[:, 1],
+                noisy_data[:, 0], noisy_data[:, 1],
+                sr=c_sr
+            )
+            enhanced_ipd_error = compute_ipd_error_with_mask(
+                clean_data[:, 0], clean_data[:, 1],
+                enhanced_data[0], enhanced_data[1],
+                sr=c_sr
+            )
+            results['IPD_error_noisy'] = noisy_ipd_error
+            results['IPD_error'] = enhanced_ipd_error
+            
+            # Also convert IPD to degrees for easier interpretation
+            results['IPD_error_noisy_deg'] = noisy_ipd_error * 180 / np.pi
+            results['IPD_error_deg'] = enhanced_ipd_error * 180 / np.pi
+        except Exception as e:
+            print(f"IPD error calculation failed: {e}")
+            
+        return results
+        
+    except Exception as e:
+        print(f"Failed to process {clean_path.name}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
-def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, output_dir, 
-                   is_timit=False, specific_snr=None, batch_size=16):
+
+# 9. Main evaluation function that uses the improved metrics
+def evaluate_model_improved(model_checkpoint, test_dataset_path, clean_dataset_path, 
+                           output_dir, specific_snr=None, batch_size=8, 
+                           limit_pairs=None, save_audio=True):
     """
-    Evaluate model with fixed file matching for TIMIT dataset
+    Evaluate model with improved metrics calculation to match the paper
+    
+    Args:
+        model_checkpoint: Path to model checkpoint
+        test_dataset_path: Path to noisy test dataset
+        clean_dataset_path: Path to clean dataset
+        output_dir: Directory to save results
+        specific_snr: Filter by specific SNR value
+        batch_size: Batch size for model inference
+        limit_pairs: Limit number of pairs to evaluate (e.g. 750 as in paper)
+        save_audio: Whether to save enhanced audio files
+        
+    Returns:
+        Dictionary of evaluation results
     """
+    # Initialize model
+    import torch
+    from hydra import compose, initialize
+    from hydra.core.global_hydra import GlobalHydra
+    
     # Initialize Hydra and load config
     GlobalHydra.instance().clear()
     initialize(config_path="config")
@@ -422,6 +661,9 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nEvaluating on {device}")
+    
+    # Import model class - modify import based on your project structure
+    from DCNN.trainer import DCNNLightningModule
     model = DCNNLightningModule(config)
     model.eval()
     
@@ -432,13 +674,10 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "enhanced"), exist_ok=True)
+    if save_audio:
+        os.makedirs(os.path.join(output_dir, "enhanced"), exist_ok=True)
     
-    # Create a proper file matching system
-    from pathlib import Path
-    import traceback
-    
-    # Get all files
+    # Find matching file pairs
     clean_files = list(Path(clean_dataset_path).glob('**/*.wav'))
     noisy_files = list(Path(test_dataset_path).glob('**/*.wav'))
     
@@ -446,7 +685,7 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
 
     # Parse file tags to ensure proper azimuth matching
     def parse_tag(stem):
-        m = re.search(r'_az(-?\d+)(?:_snr([+\-]?\d+(?:\.\d+)?))?$', stem)
+        m = re.search(r'_az(-?\d+)(?:_snr([-+]?\d+(?:\.\d+)?))?$', stem)
         az = int(m.group(1)) if m else None
         snr = float(m.group(2)) if m and m.group(2) else None
         base = stem.split('_az')[0]
@@ -471,362 +710,324 @@ def evaluate_model(model_checkpoint, test_dataset_path, clean_dataset_path, outp
     # Find matching pairs with same base name AND azimuth
     pairs = [(clean_dict[(base, az)], noisy_dict[(base, az, snr)]) 
             for (base, az, snr) in noisy_dict.keys() if (base, az) in clean_dict]
+    
+    # Sort pairs for reproducibility
+    pairs.sort(key=lambda x: str(x[0]))
+    
+    # Limit pairs to the specified number if requested
+    if limit_pairs is not None and limit_pairs > 0 and limit_pairs < len(pairs):
+        print(f"Limiting evaluation to {limit_pairs} pairs (out of {len(pairs)} available)")
+        pairs = pairs[:limit_pairs]  # Take the first N pairs
+        
     print(f"Found {len(pairs)} matching clean/noisy pairs (azimuth-aligned)")
 
     if len(pairs) == 0:
         print("ERROR: No matching clean/noisy pairs found! Check file naming patterns.")
-        return
+        return None
     
-    # Initialize results
+    # Initialize results - add noisy metrics
     results = {
         'filename': [],
-        'segSNR_L': [],
-        'segSNR_R': [],
+        'SegSNR_noisy_L': [],
+        'SegSNR_noisy_R': [],
+        'SegSNR_noisy_Avg': [],
+        'SegSNR_L': [],
+        'SegSNR_R': [],
+        'SegSNR_Avg': [],
+        'SegSNR_impr_L': [],
+        'SegSNR_impr_R': [],
+        'SegSNR_impr_Avg': [],
+        'MBSTOI_noisy': [],
         'MBSTOI': [],
+        'PESQ_noisy': [],
+        'PESQ': [],
+        'ILD_error_noisy': [],
         'ILD_error': [],
-        'IPD_error_paper': [],  # Paper's unitless version
-        'IPD_error_degrees': []  # Original degrees version
+        'IPD_error_noisy': [],
+        'IPD_error': [],
+        'IPD_error_noisy_deg': [],
+        'IPD_error_deg': []
     }
     
-    # Define a helper function to calculate all metrics for a single file
-    def calc_metrics(clean_data, noisy_data, enhanced_data, sr):
-        # RMS normalize signals before evaluation
-        def rms_normalize(signal):
-            rms = np.sqrt(np.mean(signal**2) + 1e-8)
-            return signal / rms
-
-        # Left channel
-        clean_norm_L = rms_normalize(clean_data[:, 0])
-        noisy_norm_L = rms_normalize(noisy_data[:, 0])
-        enhanced_norm_L = rms_normalize(enhanced_data[0])
-        segSNR_L = fwsegsnr(clean_norm_L, noisy_norm_L, enhanced_norm_L, sr=sr)
-        
-        # Right channel
-        clean_norm_R = rms_normalize(clean_data[:, 1])
-        noisy_norm_R = rms_normalize(noisy_data[:, 1])
-        enhanced_norm_R = rms_normalize(enhanced_data[1])
-        segSNR_R = fwsegsnr(clean_norm_R, noisy_norm_R, enhanced_norm_R, sr=sr)
-
-        # MBSTOI
-        mbstoi_score = safe_mbstoi(
-            clean_data[:, 0], clean_data[:, 1], 
-            enhanced_data[0], enhanced_data[1], 
-            sr=sr
-        )
-        
-        # ILD error
-        ild_error = compute_ild_error(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
-        
-        # IPD errors (both versions)
-        ipd_error_degrees = compute_ipd_error(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
-        
-        ipd_error_unitless = compute_ipd_error_paper_style(
-            clean_data[:, 0], clean_data[:, 1],
-            enhanced_data[0], enhanced_data[1],
-            sr=sr
-        )
-        
-        return segSNR_L, segSNR_R, mbstoi_score, ild_error, ipd_error_unitless, ipd_error_degrees
-    
     # Process in batches
-    total_batches = (len(pairs) + batch_size - 1) // batch_size  # Ceiling division
-    for batch_idx in tqdm(range(total_batches), desc=f"Processing batches (size={batch_size})", total=total_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, len(pairs))
-        batch_pairs = pairs[batch_start:batch_end]
+    total_pairs = len(pairs)
+    processed_pairs = 0
+    pbar = tqdm(total=total_pairs, desc="Processing files")
+    
+    for batch_idx in range(0, total_pairs, batch_size):
+        batch_end = min(batch_idx + batch_size, total_pairs)
+        batch_pairs = pairs[batch_idx:batch_end]
         
-        # Load all data first to determine max length and discard invalid files
-        valid_pairs = []
-        clean_data_list = []
-        noisy_data_list = []
-        clean_sr_list = []
-        
+        # Process each file
         for clean_path, noisy_path in batch_pairs:
-            try:
-                # Load clean and noisy audio
-                clean_data, c_sr = sf.read(clean_path)
-                noisy_data, n_sr = sf.read(noisy_path)
-                
-                # Skip mono files
-                if len(clean_data.shape) == 1 or len(noisy_data.shape) == 1:
-                    print(f"Warning: Mono file detected! Skipping {clean_path.name}")
-                    continue
-                
-                # Resample noisy if needed (proper per-channel resampling)
-                if n_sr != c_sr:
-                    print(f"Resampling {noisy_path.name} from {n_sr} Hz to {c_sr} Hz")
-                    noisy_data = np.stack([
-                        librosa.resample(noisy_data[:, ch], orig_sr=n_sr, target_sr=c_sr) 
-                        for ch in range(noisy_data.shape[1])
-                    ], axis=1)
-                
-                # Add to valid data
-                valid_pairs.append((clean_path, noisy_path))
-                clean_data_list.append(clean_data)
-                noisy_data_list.append(noisy_data)
-                clean_sr_list.append(c_sr)
-                
-            except Exception as e:
-                print(f"Error loading {clean_path.name} or {noisy_path.name}: {e}")
-                continue
-        
-        # Skip if no valid files in this batch
-        if not valid_pairs:
-            continue
-        
-        # Find max length in this batch
-        max_len = max(data.shape[0] for data in clean_data_list)
-        
-        # Check if batch might be too large for GPU memory
-        # Assuming 16-bit audio (2 bytes per sample) * 2 channels * batch_size * max_len
-        memory_needed_mb = 2 * 2 * len(valid_pairs) * max_len / (1024 * 1024)
-        if memory_needed_mb > 1024:  # More than 1GB of audio data
-            print(f"Warning: Large batch detected ({memory_needed_mb:.1f} MB). Consider reducing batch size.")
-        
-        # Pad all samples to the same length
-        padded_noisy_batch = []
-        for noisy_data in noisy_data_list:
-            if noisy_data.shape[0] < max_len:
-                # Pad to match max length
-                padded = np.pad(noisy_data, ((0, max_len - noisy_data.shape[0]), (0, 0)))
-            else:
-                padded = noisy_data
-            padded_noisy_batch.append(padded)
-        
-        # Create batch tensor for the model
-        batch_tensors = []
-        for padded_noisy in padded_noisy_batch:
-            # Create tensor with shape [1, channels, samples]
-            tensor = torch.tensor(padded_noisy.T, dtype=torch.float32).unsqueeze(0)
-            batch_tensors.append(tensor)
-        
-        # Stack tensors (not cat, as we need a new dimension)
-        batch_tensor = torch.stack(batch_tensors, dim=0).squeeze(1).to(device)
-        
-        # Process batch through model
-        with torch.no_grad():
-            enhanced_batch = model(batch_tensor)
-            # Move to CPU immediately to free GPU memory
-            enhanced_batch = enhanced_batch.cpu()
-        
-        # Process each file's results
-        for i in range(len(valid_pairs)):
-            try:
-                clean_path, noisy_path = valid_pairs[i]
-                clean_data = clean_data_list[i]
-                noisy_data = noisy_data_list[i]
-                enhanced_data = enhanced_batch[i].numpy()
-                sr = clean_sr_list[i]
-                
-                # Truncate enhanced data to original clean length
-                orig_len = clean_data.shape[0]
-                if enhanced_data.shape[1] > orig_len:
-                    enhanced_data = enhanced_data[:, :orig_len]
-                
-                # Calculate all metrics
-                segSNR_L, segSNR_R, mbstoi_score, ild_error, ipd_error_unitless, ipd_error_degrees = calc_metrics(
-                    clean_data, noisy_data, enhanced_data, sr
-                )
-                
+            pair_results = safe_evaluate_file(clean_path, noisy_path, model, device)
+            
+            if pair_results:
                 # Add to results
-                results['filename'].append(clean_path.name)
-                results['segSNR_L'].append(segSNR_L)
-                results['segSNR_R'].append(segSNR_R)
-                results['MBSTOI'].append(mbstoi_score)
-                results['ILD_error'].append(ild_error)
-                results['IPD_error_paper'].append(ipd_error_unitless)
-                results['IPD_error_degrees'].append(ipd_error_degrees)
+                for key in results.keys():
+                    if key in pair_results:
+                        results[key].append(pair_results[key])
+                    elif key != 'filename':
+                        results[key].append(float('nan'))  # Add NaN for missing metrics
                 
-                # Print first few results
-                if batch_idx == 0 and i < 3:
-                    print(f"\nMetrics for {clean_path.name}:")
-                    print(f"- SegSNR: L={segSNR_L:.2f} dB, R={segSNR_R:.2f} dB")
-                    print(f"- MBSTOI: {mbstoi_score:.4f}")
-                    print(f"- ILD error: {ild_error:.2f} dB")
-                    print(f"- IPD error (paper): {ipd_error_unitless:.4f}")
-                    print(f"- IPD error (degrees): {ipd_error_degrees:.2f} degrees")
-                
-                # Save enhanced audio
-                enhanced_path = os.path.join(output_dir, "enhanced", f"enhanced_{clean_path.name}")
-                sf.write(enhanced_path, enhanced_data.T, sr)
-                
-            except Exception as e:
-                print(f"Error processing file {i} in batch: {e}")
-                traceback.print_exc()
+                # Save enhanced audio if requested
+                if save_audio and 'enhanced_data' in pair_results:
+                    enhanced_path = os.path.join(output_dir, "enhanced", f"enhanced_{clean_path.name}")
+                    sf.write(enhanced_path, pair_results['enhanced_data'], pair_results.get('sr', SAMPLE_RATE))
+            
+            processed_pairs += 1
+            pbar.update(1)
+    
+    pbar.close()
     
     # Check if we processed any files
-    if not results['filename']:
+    if len(results['filename']) == 0:
         print("Warning: No files were successfully processed!")
         return None
     
     # Create DataFrame for analysis
+    import pandas as pd
     results_df = pd.DataFrame(results)
     
-    # Calculate average metrics
+    # Calculate average metrics (excluding NaN values)
     average_results = {
-        'Average SegSNR (L)': results_df['segSNR_L'].mean(),
-        'Average SegSNR (R)': results_df['segSNR_R'].mean(),
-        'Average SegSNR Improvement': (results_df['segSNR_L'].mean() + results_df['segSNR_R'].mean()) / 2,
-        'Average MBSTOI': results_df['MBSTOI'].mean(),
-        'Average ILD Error (dB)': results_df['ILD_error'].mean(),
-        'Average IPD Error (paper)': results_df['IPD_error_paper'].mean(),
-        'Average IPD Error (degrees)': results_df['IPD_error_degrees'].mean()
+        # Noisy signal metrics
+        'Average SegSNR Noisy (L)': np.nanmean(results_df['SegSNR_noisy_L']),
+        'Average SegSNR Noisy (R)': np.nanmean(results_df['SegSNR_noisy_R']),
+        'Average SegSNR Noisy': np.nanmean(results_df['SegSNR_noisy_Avg']),
+        'Average MBSTOI Noisy': np.nanmean(results_df['MBSTOI_noisy']),
+        'Average PESQ Noisy': np.nanmean(results_df['PESQ_noisy']),
+        'Average ILD Error Noisy (dB)': np.nanmean(results_df['ILD_error_noisy']),
+        'Average IPD Error Noisy (rad)': np.nanmean(results_df['IPD_error_noisy']),
+        'Average IPD Error Noisy (deg)': np.nanmean(results_df['IPD_error_noisy_deg']),
+        
+        # Enhanced signal metrics
+        'Average SegSNR (L)': np.nanmean(results_df['SegSNR_L']),
+        'Average SegSNR (R)': np.nanmean(results_df['SegSNR_R']),
+        'Average SegSNR': np.nanmean(results_df['SegSNR_Avg']),
+        'Average SegSNR Improvement': np.nanmean(results_df['SegSNR_impr_Avg']),
+        'Average MBSTOI': np.nanmean(results_df['MBSTOI']),
+        'Average PESQ': np.nanmean(results_df['PESQ']),
+        'Average ILD Error (dB)': np.nanmean(results_df['ILD_error']),
+        'Average IPD Error (rad)': np.nanmean(results_df['IPD_error']),
+        'Average IPD Error (deg)': np.nanmean(results_df['IPD_error_deg']),
+        
+        # Processing stats
+        'Files Processed': len(results_df),
+        'Total Files': total_pairs,
+        'Processing Rate': f"{len(results_df) / total_pairs * 100:.1f}%"
     }
     
     # Save results
     results_df.to_csv(os.path.join(output_dir, "detailed_results.csv"), index=False)
     
     with open(os.path.join(output_dir, "average_results.txt"), 'w') as f:
-        for metric, value in average_results.items():
-            f.write(f"{metric}: {value:.4f}\n")
-            print(f"{metric}: {value:.4f}")
+        # First write noisy metrics
+        f.write("===== NOISY SIGNAL METRICS =====\n")
+        for metric in [key for key in average_results.keys() if 'Noisy' in key]:
+            value = average_results[metric]
+            if isinstance(value, float):
+                f.write(f"{metric}: {value:.4f}\n")
+                print(f"{metric}: {value:.4f}")
+            else:
+                f.write(f"{metric}: {value}\n")
+                print(f"{metric}: {value}")
+        
+        # Then write enhanced metrics
+        f.write("\n===== ENHANCED SIGNAL METRICS =====\n")
+        for metric in [key for key in average_results.keys() if 'Noisy' not in key and key not in ['Files Processed', 'Total Files', 'Processing Rate']]:
+            value = average_results[metric]
+            if isinstance(value, float):
+                f.write(f"{metric}: {value:.4f}\n")
+                print(f"{metric}: {value:.4f}")
+            else:
+                f.write(f"{metric}: {value}\n")
+                print(f"{metric}: {value}")
+        
+        # Finally write processing stats
+        f.write("\n===== PROCESSING STATS =====\n")
+        for metric in ['Files Processed', 'Total Files', 'Processing Rate']:
+            value = average_results[metric]
+            f.write(f"{metric}: {value}\n")
+            print(f"{metric}: {value}")
             
     return average_results
 
-def run_paper_style_evaluation(model_checkpoint, vctk_test_dir, vctk_clean_dir, 
-                          timit_test_dir, timit_clean_dir, output_dir):
+
+# 10. Paper-style evaluation function with fixed SNR levels
+def evaluate_at_paper_snrs(model_checkpoint, vctk_test_dir, vctk_clean_dir, 
+                          timit_test_dir=None, timit_clean_dir=None, 
+                          output_dir="results", batch_size=8, limit_pairs=750, 
+                          save_audio=False):
     """
-    Run evaluation in the same style as presented in the paper
-    """
-    # Create main output directory
-    os.makedirs(output_dir, exist_ok=True)
+    Evaluate model at the same SNR levels used in the paper
     
-    # Define SNR values as used in the paper (with consistent float format)
-    snr_values = [-6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0]
-    
-    # Prepare results dictionaries for paper tables
-    vctk_results = {snr: {} for snr in snr_values}
-    timit_results = {snr: {} for snr in snr_values}
-    
-    # VCTK matched condition testing
-    print("=== Evaluating on VCTK (matched condition) ===")
-    
-    for snr in snr_values:
-        print(f"\nEvaluating VCTK at SNR = {snr} dB")
-        # Filter files by SNR
-        snr_dir = f"snr_{int(snr)}dB"  # Convert to int for directory name
-        snr_test_dir = os.path.join(vctk_test_dir, snr_dir)
+    Args:
+        model_checkpoint: Path to model checkpoint
+        vctk_test_dir: Path to VCTK noisy test dataset
+        vctk_clean_dir: Path to VCTK clean dataset
+        timit_test_dir: Optional path to TIMIT noisy test dataset
+        timit_clean_dir: Optional path to TIMIT clean dataset
+        output_dir: Directory to save results
+        batch_size: Batch size for model inference
+        limit_pairs: Limit number of pairs to evaluate (750 as in paper)
+        save_audio: Whether to save enhanced audio files
         
+    Returns:
+        Dictionary of results by SNR
+    """
+    # SNR levels used in the paper
+    paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
+    
+    # Process VCTK dataset
+    vctk_results_by_snr = {}
+    vctk_output_dir = os.path.join(output_dir, "vctk")
+    
+    # Create output directory
+    os.makedirs(vctk_output_dir, exist_ok=True)
+    
+    print("\n===== EVALUATING VCTK DATASET =====")
+    for snr in paper_snrs:
+        print(f"\n===== Evaluating VCTK at SNR = {snr} dB =====")
+        snr_output_dir = os.path.join(vctk_output_dir, f"snr_{snr}dB")
+        
+        # Check if SNR-specific subdirectory exists
+        snr_test_dir = os.path.join(vctk_test_dir, f"snr_{snr}dB")
         if not os.path.exists(snr_test_dir):
-            print(f"Warning: {snr_test_dir} not found. Checking if using flat structure...")
-            # Try flat structure if SNR directories don't exist
+            print(f"SNR subdirectory not found: {snr_test_dir}")
+            print(f"Using flat structure with specific_snr parameter...")
             snr_test_dir = vctk_test_dir
-        
-        snr_output_dir = os.path.join(output_dir, f"vctk_snr_{int(snr)}dB")
-        
-        # Run evaluation at this SNR level with specific_snr as float
-        vctk_results[snr] = evaluate_model(
+            
+        # Evaluate at this SNR level
+        snr_results = evaluate_model_improved(
             model_checkpoint,
             snr_test_dir,
             vctk_clean_dir,
             snr_output_dir,
-            is_timit=False,
-            specific_snr=snr  # Pass the float value
+            specific_snr=snr,
+            batch_size=batch_size,
+            limit_pairs=limit_pairs,
+            save_audio=save_audio
         )
-    
-    # TIMIT unmatched condition testing (if available)
-    if timit_test_dir and timit_clean_dir:
-        print("\n=== Evaluating on TIMIT (unmatched condition) ===")
         
-        for snr in snr_values:
-            print(f"\nEvaluating TIMIT at SNR = {snr} dB")
-            # SNR-specific directory for TIMIT
-            timit_snr_test_dir = os.path.join(timit_test_dir, f"snr_{int(snr)}dB")
+        if snr_results:
+            vctk_results_by_snr[snr] = snr_results
+    
+    # Process TIMIT dataset if provided
+    timit_results_by_snr = {}
+    if timit_test_dir and timit_clean_dir:
+        timit_output_dir = os.path.join(output_dir, "timit")
+        
+        # Create output directory
+        os.makedirs(timit_output_dir, exist_ok=True)
+        
+        print("\n===== EVALUATING TIMIT DATASET (UNMATCHED CONDITION) =====")
+        for snr in paper_snrs:
+            print(f"\n===== Evaluating TIMIT at SNR = {snr} dB =====")
+            snr_output_dir = os.path.join(timit_output_dir, f"snr_{snr}dB")
             
-            if not os.path.exists(timit_snr_test_dir):
-                print(f"Warning: {timit_snr_test_dir} not found. Skipping TIMIT evaluation at {snr} dB.")
-                continue
+            # Check if SNR-specific subdirectory exists
+            snr_test_dir = os.path.join(timit_test_dir, f"snr_{snr}dB")
+            if not os.path.exists(snr_test_dir):
+                print(f"SNR subdirectory not found: {snr_test_dir}")
+                print(f"Using flat structure with specific_snr parameter...")
+                snr_test_dir = timit_test_dir
                 
-            snr_output_dir = os.path.join(output_dir, f"timit_snr_{int(snr)}dB")
-            
-            # Run evaluation at this SNR level with specific_snr as float
-            timit_results[snr] = evaluate_model(
+            # Evaluate at this SNR level
+            snr_results = evaluate_model_improved(
                 model_checkpoint,
-                timit_snr_test_dir,
+                snr_test_dir,
                 timit_clean_dir,
                 snr_output_dir,
-                is_timit=True,
-                specific_snr=snr  # Pass the float value
+                specific_snr=snr,
+                batch_size=batch_size,
+                limit_pairs=limit_pairs,
+                save_audio=save_audio
             )
-    
-    # Generate paper-style tables
-    generate_paper_tables(vctk_results, timit_results, output_dir)
-    
-    return vctk_results, timit_results
-
-def generate_paper_tables(vctk_results, timit_results, output_dir):
-    """Generate tables in the same format as in the paper"""
-    snr_values = [-6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 15.0]
-    
-    # Table 1: Anechoic results (VCTK) as in the paper
-    with open(os.path.join(output_dir, "table1_anechoic_results.csv"), 'w') as f:
-        f.write("Input SNR,MBSTOI,ΔSegSNR,L_ILD (dB),L_IPD\n")
-        
-        for snr in snr_values:
-            if snr in vctk_results:
-                result = vctk_results[snr]
-                f.write(f"{int(snr)},{result.get('Average MBSTOI', 'N/A'):.2f},{result.get('Average SegSNR Improvement', 'N/A'):.1f},{result.get('Average ILD Error (dB)', 'N/A'):.2f},{result.get('Average IPD Error (paper)', 'N/A'):.2f}\n")
-
-    # Table 2: Unmatched condition (TIMIT) results if available
-    if timit_results:
-        with open(os.path.join(output_dir, "table2_timit_results.csv"), 'w') as f:
-            f.write("Input SNR,MBSTOI,ΔSegSNR,L_ILD (dB),L_IPD (degrees)\n")
             
-            for snr in snr_values:
-                if snr in timit_results:
-                    result = timit_results[snr]
-                    f.write(f"{snr},{result.get('Average MBSTOI', 'N/A'):.2f},{result.get('Average SegSNR Improvement', 'N/A'):.1f},{result.get('Average ILD Error (dB)', 'N/A'):.2f},{result.get('Average IPD Error (degrees)', 'N/A'):.1f}\n")
+            if snr_results:
+                timit_results_by_snr[snr] = snr_results
     
-    # Generate comparison with paper results
-    paper_results = {
-        # Values from Table 1 in the paper for BCCTN-Proposed Loss
-        -6: {"MBSTOI": 0.73, "SegSNR": 14.3, "ILD": 0.61, "IPD": 8},
-        -3: {"MBSTOI": 0.79, "SegSNR": 12.7, "ILD": 0.62, "IPD": 7},
-        0: {"MBSTOI": 0.85, "SegSNR": 12.7, "ILD": 0.40, "IPD": 5},
-        3: {"MBSTOI": 0.87, "SegSNR": 11.5, "ILD": 0.36, "IPD": 4},
-        6: {"MBSTOI": 0.91, "SegSNR": 9.7, "ILD": 0.34, "IPD": 3},
-        9: {"MBSTOI": 0.94, "SegSNR": 8.4, "ILD": 0.20, "IPD": 2},
-        12: {"MBSTOI": 0.96, "SegSNR": 7.0, "ILD": 0.19, "IPD": 2},
-        15: {"MBSTOI": 0.96, "SegSNR": 5.4, "ILD": 0.19, "IPD": 2}
+    # Generate paper-style tables for both datasets
+    generate_paper_style_table(vctk_results_by_snr, os.path.join(output_dir, "vctk_paper_style_results.csv"), "VCTK")
+    if timit_test_dir and timit_clean_dir:
+        generate_paper_style_table(timit_results_by_snr, os.path.join(output_dir, "timit_paper_style_results.csv"), "TIMIT")
+    
+    # Combine results for overall average
+    all_results = {
+        'vctk': vctk_results_by_snr,
+        'timit': timit_results_by_snr if timit_test_dir and timit_clean_dir else None
     }
     
-    with open(os.path.join(output_dir, "comparison_with_paper.csv"), 'w') as f:
-        f.write("SNR,Metric,Paper Value,Our Value,Difference\n")
-        
-        for snr in snr_values:
-            if snr in vctk_results and snr in paper_results:
-                result = vctk_results[snr]
-                paper = paper_results[snr]
-                
-                # MBSTOI
-                our_mbstoi = result.get('Average MBSTOI', 0)
-                paper_mbstoi = paper["MBSTOI"]
-                f.write(f"{snr},MBSTOI,{paper_mbstoi:.2f},{our_mbstoi:.2f},{our_mbstoi-paper_mbstoi:.2f}\n")
-                
-                # SegSNR
-                our_segsnr = result.get('Average SegSNR Improvement', 0)
-                paper_segsnr = paper["SegSNR"]
-                f.write(f"{snr},SegSNR,{paper_segsnr:.1f},{our_segsnr:.1f},{our_segsnr-paper_segsnr:.1f}\n")
-                
-                # ILD Error
-                our_ild = result.get('Average ILD Error (dB)', 0)
-                paper_ild = paper["ILD"]
-                f.write(f"{snr},ILD,{paper_ild:.2f},{our_ild:.2f},{our_ild-paper_ild:.2f}\n")
-                
-                # IPD Error
-                our_ipd = result.get('Average IPD Error (degrees)', 0)
-                paper_ipd = paper["IPD"]
-                f.write(f"{snr},IPD,{paper_ipd:.1f},{our_ipd:.1f},{our_ipd-paper_ipd:.1f}\n")
+    return all_results
 
+
+def generate_paper_style_table(results_by_snr, output_file, dataset_name):
+    """Generate paper-style results table for a dataset"""
+    
+    paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
+    
+    # Generate paper-style table for noisy and enhanced metrics
+    with open(output_file, 'w') as f:
+        # Header
+        f.write("SNR,MBSTOI_noisy,MBSTOI,SegSNR_noisy,SegSNR,SegSNR_impr,L_ILD_noisy,L_ILD,L_IPD_noisy,L_IPD\n")
+        
+        for snr in paper_snrs:
+            if snr in results_by_snr:
+                result = results_by_snr[snr]
+                f.write(f"{snr}," +
+                        f"{result.get('Average MBSTOI Noisy', 'N/A'):.4f}," +
+                        f"{result.get('Average MBSTOI', 'N/A'):.4f}," +
+                        f"{result.get('Average SegSNR Noisy', 'N/A'):.2f}," +
+                        f"{result.get('Average SegSNR', 'N/A'):.2f}," +
+                        f"{result.get('Average SegSNR Improvement', 'N/A'):.2f}," +
+                        f"{result.get('Average ILD Error Noisy (dB)', 'N/A'):.4f}," +
+                        f"{result.get('Average ILD Error (dB)', 'N/A'):.4f}," +
+                        f"{result.get('Average IPD Error Noisy (deg)', 'N/A'):.2f}," +
+                        f"{result.get('Average IPD Error (deg)', 'N/A'):.2f}\n")
+    
+    # Calculate overall averages
+    if results_by_snr:
+        avg_mbstoi_noisy = np.nanmean([r.get('Average MBSTOI Noisy', 0) for r in results_by_snr.values()])
+        avg_mbstoi = np.nanmean([r.get('Average MBSTOI', 0) for r in results_by_snr.values()])
+        avg_segsnr_noisy = np.nanmean([r.get('Average SegSNR Noisy', 0) for r in results_by_snr.values()])
+        avg_segsnr = np.nanmean([r.get('Average SegSNR', 0) for r in results_by_snr.values()])
+        avg_segsnr_impr = np.nanmean([r.get('Average SegSNR Improvement', 0) for r in results_by_snr.values()])
+        avg_ild_noisy = np.nanmean([r.get('Average ILD Error Noisy (dB)', 0) for r in results_by_snr.values()])
+        avg_ild = np.nanmean([r.get('Average ILD Error (dB)', 0) for r in results_by_snr.values()])
+        avg_ipd_noisy_deg = np.nanmean([r.get('Average IPD Error Noisy (deg)', 0) for r in results_by_snr.values()])
+        avg_ipd_deg = np.nanmean([r.get('Average IPD Error (deg)', 0) for r in results_by_snr.values()])
+        
+        print(f"\n===== {dataset_name} PAPER STYLE AVERAGES =====")
+        print(f"Average MBSTOI Noisy: {avg_mbstoi_noisy:.4f}")
+        print(f"Average MBSTOI Enhanced: {avg_mbstoi:.4f}")
+        print(f"Average SegSNR Noisy: {avg_segsnr_noisy:.2f}")
+        print(f"Average SegSNR Enhanced: {avg_segsnr:.2f}")
+        print(f"Average SegSNR Improvement: {avg_segsnr_impr:.2f}")
+        print(f"Average ILD Error Noisy: {avg_ild_noisy:.4f} dB")
+        print(f"Average ILD Error Enhanced: {avg_ild:.4f} dB")
+        print(f"Average IPD Error Noisy: {avg_ipd_noisy_deg:.2f} deg")
+        print(f"Average IPD Error Enhanced: {avg_ipd_deg:.2f} deg")
+        
+        # Save averages
+        avg_file = output_file.replace('.csv', '_averages.txt')
+        with open(avg_file, 'w') as f:
+            f.write(f"===== {dataset_name} PAPER STYLE AVERAGES =====\n")
+            f.write(f"Average MBSTOI Noisy: {avg_mbstoi_noisy:.4f}\n")
+            f.write(f"Average MBSTOI Enhanced: {avg_mbstoi:.4f}\n")
+            f.write(f"Average SegSNR Noisy: {avg_segsnr_noisy:.2f}\n")
+            f.write(f"Average SegSNR Enhanced: {avg_segsnr:.2f}\n")
+            f.write(f"Average SegSNR Improvement: {avg_segsnr_impr:.2f}\n")
+            f.write(f"Average ILD Error Noisy: {avg_ild_noisy:.4f} dB\n")
+            f.write(f"Average ILD Error Enhanced: {avg_ild:.4f} dB\n")
+            f.write(f"Average IPD Error Noisy: {avg_ipd_noisy_deg:.2f} deg\n")
+            f.write(f"Average IPD Error Enhanced: {avg_ipd_deg:.2f} deg\n")
+
+
+# 11. Command-line interface
 if __name__ == "__main__":
+    import argparse
+    
     parser = argparse.ArgumentParser(description="Evaluate binaural speech enhancement model")
     
     # Basic evaluation arguments
@@ -838,37 +1039,47 @@ if __name__ == "__main__":
     # Arguments for paper-style evaluation
     parser.add_argument("--paper_style_eval", action="store_true", help="Run paper-style evaluation with SNR breakdown")
     parser.add_argument("--vctk_test_dir", help="Path to VCTK noisy test dataset")
-    parser.add_argument("--vctk_clean_dir", help="Path to VCTK clean test dataset")
+    parser.add_argument("--vctk_clean_dir", help="Path to VCTK clean dataset")
     parser.add_argument("--timit_test_dir", help="Path to TIMIT noisy test dataset")
-    parser.add_argument("--timit_clean_dir", help="Path to TIMIT clean test dataset")
+    parser.add_argument("--timit_clean_dir", help="Path to TIMIT clean dataset")
     parser.add_argument("--specific_snr", type=float, help="Filter by specific SNR value")
     parser.add_argument("--batch_size", type=int, default=8, 
-                    help="Batch size for model inference (higher values use more GPU memory)")
+                        help="Batch size for model inference (higher values use more GPU memory)")
+    parser.add_argument("--limit_pairs", type=int, default=750, 
+                        help="Limit number of pairs to evaluate (default: 750 as in paper)")
+    parser.add_argument("--save_audio", action="store_true", help="Save enhanced audio files")
+    
     args = parser.parse_args()
     
     if args.paper_style_eval:
         # Run paper-style evaluation with SNR breakdown (-6 to 15 dB)
         if not all([args.vctk_test_dir, args.vctk_clean_dir]):
-            parser.error("Paper-style evaluation requires VCTK test and clean directories")
+            parser.error("Paper-style evaluation requires at least VCTK test and clean dataset paths")
         
-        print("Running paper-style evaluation with SNR points from -6 to 15 dB (3 dB steps)")
+        print("Running paper-style evaluation with SNR points from -6 to 15 dB")
         evaluate_at_paper_snrs(
             args.model_checkpoint,
             args.vctk_test_dir,
             args.vctk_clean_dir,
+            args.timit_test_dir,
+            args.timit_clean_dir,
             args.output_dir,
-            batch_size=args.batch_size  # Pass the batch_size parameter
+            batch_size=args.batch_size,
+            limit_pairs=args.limit_pairs,
+            save_audio=args.save_audio
         )
     else:
         # Run basic evaluation
         if not all([args.test_dataset_path, args.clean_dataset_path]):
             parser.error("Basic evaluation requires test and clean dataset paths")
         
-        evaluate_model(
+        evaluate_model_improved(
             args.model_checkpoint,
             args.test_dataset_path,
             args.clean_dataset_path,
             args.output_dir,
             specific_snr=args.specific_snr,
-            batch_size=args.batch_size  # Pass the batch_size parameter
+            batch_size=args.batch_size,
+            limit_pairs=args.limit_pairs,
+            save_audio=args.save_audio
         )
