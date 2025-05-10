@@ -45,7 +45,8 @@ class BaseDataset(torch.utils.data.Dataset):
             return (noisy_signal, clean_signal)
 
     def _get_file_paths(self, dataset_dir):
-        file_paths = [
-            os.path.join(dataset_dir / fp) for fp in sorted(Path(dataset_dir).rglob('*.wav'))
-        ]
-        return file_paths
+        # Convert to Path object if it's a string
+        dataset_dir = Path(dataset_dir) if isinstance(dataset_dir, str) else dataset_dir
+        # Just return the full paths directly
+        file_paths = sorted(dataset_dir.rglob('*.wav'))
+        return [str(fp) for fp in file_paths]  # Convert Path objects to strings

@@ -37,7 +37,7 @@ class BinauralAttentionDCNN(DCNN):
         # x_l_rnn = self.rnn(encoder_out_l[-1])
         # x_r_rnn = self.rnn(encoder_out_r[-1])
         # breakpoint()
-        attention_in = torch.cat((encoder_out_l[-1],encoder_out_r[-1]), dim=1)
+        # attention_in = torch.cat((encoder_out_l[-1],encoder_out_r[-1]), dim=1)
         
         #
         # breakpoint()
@@ -45,7 +45,7 @@ class BinauralAttentionDCNN(DCNN):
         # x_r_mattn = self.mattn(encoder_out_r[-1])
         # breakpoint()
 
-        x_attn = self.mattn(attention_in)
+        # x_attn = self.mattn(attention_in)
         # rnn_out = torch.cat((x_l_rnn, x_r_rnn), dim=1)
         # breakpoint()
         # attention_dec = self.attention_enc(rnn_out)
@@ -53,13 +53,24 @@ class BinauralAttentionDCNN(DCNN):
         # _, dec_attn_len, _, _ = attention_dec.shape
         # decoder_attn_l = attention_dec[:, :dec_attn_len//2, :, :]
         # decoder_attn_r = attention_dec[:, dec_attn_len//2:, :, :]
-        x_l_mattn = x_attn[:,:128,:,:]
-        x_r_mattn = x_attn[:,128:,:,:]
+        # x_l_mattn = x_attn[:,:128,:,:]
+        # x_r_mattn = x_attn[:,128:,:,:]
         # x_l_mattn = x_attn[:,:64,:,:]
         # x_r_mattn = x_attn[:,64:,:,:]
+
+
+        enc_last = torch.cat([encoder_out_l[-1], encoder_out_r[-1]], dim=1)  # C=256
+        x_attn   = self.mattn(enc_last)                                      # input_size=1024
+        # 之後再 split 成兩半送兩個 decoder
+        x_l_mattn, x_r_mattn = x_attn.chunk(2, dim=1)
+
+        # x_l_mattn = self.mattn(encoder_out_l[-1])
+        # x_r_mattn = self.mattn(encoder_out_r[-1])
         # 3. Apply decoder
         # x_l = self.decoder(x_l_rnn, encoder_out_l)
         # x_r = self.decoder(x_r_rnn, encoder_out_r)
+        # x_l = self.decoder(x_l_mattn, encoder_out_l)
+        # x_r = self.decoder(x_r_mattn, encoder_out_r)
         x_l = self.decoder(x_l_mattn, encoder_out_l)
         x_r = self.decoder(x_r_mattn, encoder_out_r)
 

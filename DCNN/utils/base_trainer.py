@@ -93,16 +93,27 @@ class BaseLightningModule(pl.LightningModule):
     and basic training/testing/validation conventions
     """
 
-    def __init__(self, model, loss,
-                 log_step=400):
+    # def __init__(self, model, loss,
+    #              log_step=400):
+    #     super().__init__()
+
+    #     self.is_cuda_available = torch.cuda.is_available()
+
+    #     self.model = model
+    #     self.loss = loss
+
+    #     self.log_step = log_step
+
+    def __init__(self, model, loss, log_step=400):
         super().__init__()
-
         self.is_cuda_available = torch.cuda.is_available()
-
         self.model = model
         self.loss = loss
-
         self.log_step = log_step
+        # Add these lines:
+        self.train_step_outputs = []
+        self.val_step_outputs = []
+        self.test_step_outputs = []
 
     def _step(self, batch, batch_idx, log_model_output=False,
               log_labels=False):
@@ -130,17 +141,32 @@ class BaseLightningModule(pl.LightningModule):
 
         return output_dict
 
-    def training_step(self, batch, batch_idx):
+    # def training_step(self, batch, batch_idx):
 
-        return self._step(batch, batch_idx,log_model_output=False)
+    #     return self._step(batch, batch_idx,log_model_output=False)
+
+    # def validation_step(self, batch, batch_idx):
+    #     return self._step(batch, batch_idx,
+    #                       log_model_output=False, log_labels=True)
+
+    # def test_step(self, batch, batch_idx):
+    #     return self._step(batch, batch_idx,
+    #                       log_model_output=False, log_labels=True)
+
+    def training_step(self, batch, batch_idx):
+        output_dict = self._step(batch, batch_idx, log_model_output=False)
+        self.train_step_outputs.append(output_dict)
+        return output_dict
 
     def validation_step(self, batch, batch_idx):
-        return self._step(batch, batch_idx,
-                          log_model_output=False, log_labels=True)
+        output_dict = self._step(batch, batch_idx, log_model_output=False, log_labels=True)
+        self.val_step_outputs.append(output_dict)
+        return output_dict
 
     def test_step(self, batch, batch_idx):
-        return self._step(batch, batch_idx,
-                          log_model_output=False, log_labels=True)
+        output_dict = self._step(batch, batch_idx, log_model_output=False, log_labels=True)
+        self.test_step_outputs.append(output_dict)
+        return output_dict
 
     def _epoch_end(self, outputs, epoch_type="train", save_pickle=False):
         # 1. Compute epoch metrics
@@ -165,14 +191,32 @@ class BaseLightningModule(pl.LightningModule):
 
         return epoch_stats
 
-    def training_epoch_end(self, outputs):
-        self._epoch_end(outputs)
+    # def training_epoch_end(self, outputs):
+    #     self._epoch_end(outputs)
 
-    def validation_epoch_end(self, outputs):
-        self._epoch_end(outputs, epoch_type="validation")
+    # def validation_epoch_end(self, outputs):
+    #     self._epoch_end(outputs, epoch_type="validation")
 
-    def test_epoch_end(self, outputs):
-        self._epoch_end(outputs, epoch_type="test", save_pickle=True)
+    # def test_epoch_end(self, outputs):
+    #     self._epoch_end(outputs, epoch_type="test", save_pickle=True)
+
+    # 在 LightningModule 中
+    def on_train_start(self):
+        print("root device :", self.trainer.strategy.root_device)
+        print("first param  :", next(self.parameters()).device)
+    
+
+    def on_train_epoch_end(self):
+        self._epoch_end(self.train_step_outputs)
+        self.train_step_outputs = []
+
+    def on_validation_epoch_end(self):
+        self._epoch_end(self.val_step_outputs, epoch_type="validation")
+        self.val_step_outputs = []
+
+    def on_test_epoch_end(self):
+        self._epoch_end(self.test_step_outputs, epoch_type="test", save_pickle=True)
+        self.test_step_outputs = []
 
     def forward(self, x):
         return self.model(x)

@@ -19,7 +19,7 @@
 #     patience_in_epochs: 3
 
 training:
-  batch_size: 8
+  batch_size: 16
   n_epochs: 100
   learning_rate: 0.001
   learning_rate_decay_steps: [3, 8]

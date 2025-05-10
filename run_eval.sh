@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Set paths
-MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/DCNN/Checkpoints/Trained_model.ckpt"
+# MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/DCNN/Checkpoints/Trained_model.ckpt"
+MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-09/21-41-20/logs/lightning_logs/version_0/checkpoints/last.ckpt"
 VCTK_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset"
 VCTK_CLEAN_DIR="/raid/R12K41024/BCCTN/Dataset/clean_testset"
 TIMIT_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset_timit"
