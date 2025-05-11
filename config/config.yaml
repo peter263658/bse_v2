@@ -25,7 +25,7 @@
 #   strategy: ddp_spawn
 #   train_checkpoint_path: null
 dataset:
-  noisy_test_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_testset
+  noisy_test_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_testset/snr_0dB
   noisy_training_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_trainset
   noisy_validation_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_valset
   target_test_dataset_dir: /raid/R12K41024/BCCTN/Dataset/clean_testset
@@ -70,6 +70,7 @@ training:
   pin_memory: true
   strategy: auto
   train_checkpoint_path: null
+  logger: true
   early_stopping:
     enabled: true
     key_to_monitor: validation_loss

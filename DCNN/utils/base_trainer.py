@@ -23,7 +23,7 @@ class BaseTrainer(pl.Trainer):
                  early_stopping_config=None,
                  strategy=None,              # ← 預設 None
                  accelerator=None,           # ← 也是 None
-                 profiler='advanced'):
+                 profiler=None):
 
         gpu_count = torch.cuda.device_count()
 

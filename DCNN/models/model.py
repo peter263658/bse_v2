@@ -18,7 +18,7 @@ class DCNN(nn.Module):
             kernel_size=5, 
             kernel_num=[16, 32, 64, 128, 256,256], 
             # kernel_num = [ 8, 16, 32, 64, 128, 128],
-            bidirectional=False, embed_dim=1024, num_heads=32, **kwargs
+            bidirectional=False, embed_dim=512, num_heads=32, **kwargs
     ):
         ''' 
             rnn_layers: the number of lstm layers in the crn,
