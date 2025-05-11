@@ -14,7 +14,7 @@ EPS = 1e-6
 class BinauralLoss(Module):
     def __init__(self, win_len=400,
                  win_inc=100, fft_len=512, sr=16000,
-                 ild_weight=0.1, ipd_weight=1, stoi_weight=0, 
+                 ild_weight=1, ipd_weight=10, stoi_weight=10, 
                   snr_loss_weight=1):
 
         super().__init__()

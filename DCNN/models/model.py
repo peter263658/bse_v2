@@ -145,9 +145,12 @@ class Encoder(nn.Module):
                     torch_complex.ComplexConv2d(
                         self.kernel_num[idx]//2,
                         self.kernel_num[idx + 1]//2,
-                        kernel_size=(self.kernel_size, 2),
+                        # kernel_size=(self.kernel_size, 2),
+                        # stride=(2, 1),
+                        # padding=(2, 1)
+                        kernel_size=(self.kernel_size, 1),
                         stride=(2, 1),
-                        padding=(2, 1)
+                        padding=(2, 0)
                     ),
                     torch_complex.NaiveComplexBatchNorm2d(
                         self.kernel_num[idx + 1]//2),
@@ -179,9 +182,12 @@ class Decoder(nn.Module):
                 torch_complex.ComplexConvTranspose2d(
                     self.kernel_num[idx],  # * 2,
                     self.kernel_num[idx - 1]//2,
-                    kernel_size=(self.kernel_size, 2),
+                    # kernel_size=(self.kernel_size, 2),
+                    # stride=(2, 1),
+                    # padding=(2, 1),
+                    kernel_size=(self.kernel_size, 1),
                     stride=(2, 1),
-                    padding=(2, 1),
+                    padding=(2, 0),
                     output_padding=(1, 0)
                 ),
             ]
@@ -261,45 +267,67 @@ class Decoder(nn.Module):
 #         x = x.movedim(1, -1)
 
 #         return x
-class MultiAttnBlock(nn.Module):
-    def __init__(self, input_size, hidden_size, embed_dim=512, num_heads=32, 
-                batch_first=True):
-        super().__init__()
+# class MultiAttnBlock(nn.Module):
+#     def __init__(self, input_size, hidden_size, embed_dim=512, num_heads=32, 
+#                 batch_first=True):
+#         super().__init__()
 
-        # The key change: use the embed_dim from config, don't try to match input_size
+#         # The key change: use the embed_dim from config, don't try to match input_size
+#         self.mattn = torch_complex.ComplexMultiheadAttention(
+#             embed_dim=embed_dim, num_heads=num_heads, batch_first=batch_first)
+
+#         # Add a projection layer to convert from input_size to embed_dim
+#         self.input_proj = nn.Linear(
+#             in_features=input_size,
+#             out_features=embed_dim,
+#             dtype=torch.complex64
+#         )
+        
+#         # Output projection goes from embed_dim back to input_size
+#         self.output_proj = nn.Linear(
+#             in_features=embed_dim,
+#             out_features=input_size,
+#             dtype=torch.complex64
+#         )
+
+#     def forward(self, x):
+#         batch_size, channels, freqs, time_bins = x.shape
+#         x = x.flatten(start_dim=1, end_dim=2)
+#         x = x.transpose(1, 2)
+        
+#         # Project to embed_dim before attention
+#         x = self.input_proj(x)
+        
+#         # Apply attention
+#         x = self.mattn(x)
+        
+#         # Project back to original dimension
+#         x = self.output_proj(x)
+        
+#         # Reshape back
+#         x = x.unflatten(-1, (channels, freqs))
+#         x = x.movedim(1, -1)
+
+#         return x
+
+class MultiAttnBlock(nn.Module):
+    def __init__(self, input_size, hidden_size, embed_dim=512, num_heads=32, batch_first=True):
+        super().__init__()
+        # Project to embed_dim first (exactly as in paper)
+        self.input_proj = nn.Linear(input_size, embed_dim, dtype=torch.complex64)
+        # Use the right number of heads as in paper
         self.mattn = torch_complex.ComplexMultiheadAttention(
             embed_dim=embed_dim, num_heads=num_heads, batch_first=batch_first)
-
-        # Add a projection layer to convert from input_size to embed_dim
-        self.input_proj = nn.Linear(
-            in_features=input_size,
-            out_features=embed_dim,
-            dtype=torch.complex64
-        )
-        
-        # Output projection goes from embed_dim back to input_size
-        self.output_proj = nn.Linear(
-            in_features=embed_dim,
-            out_features=input_size,
-            dtype=torch.complex64
-        )
+        # Project back to original dimension
+        self.output_proj = nn.Linear(embed_dim, input_size, dtype=torch.complex64)
 
     def forward(self, x):
         batch_size, channels, freqs, time_bins = x.shape
         x = x.flatten(start_dim=1, end_dim=2)
         x = x.transpose(1, 2)
-        
-        # Project to embed_dim before attention
         x = self.input_proj(x)
-        
-        # Apply attention
         x = self.mattn(x)
-        
-        # Project back to original dimension
         x = self.output_proj(x)
-        
-        # Reshape back
         x = x.unflatten(-1, (channels, freqs))
         x = x.movedim(1, -1)
-
         return x
