@@ -209,18 +209,42 @@ def ipd_rad(s1, s2, eps=EPS, avg_mode=None):
     return ipd_value
 
 
-def ipd_loss_rads(target_stft_l, target_stft_r,
-                  output_stft_l, output_stft_r, avg_mode=None):
-    # amptodB = T.AmplitudeToDB(stype='amplitude')
-    target_ipd = ipd_rad(target_stft_l, target_stft_r, avg_mode=avg_mode)
-    output_ipd = ipd_rad(output_stft_l, output_stft_r, avg_mode=avg_mode)
+# def ipd_loss_rads(target_stft_l, target_stft_r,
+#                   output_stft_l, output_stft_r, avg_mode=None):
+#     # amptodB = T.AmplitudeToDB(stype='amplitude')
+#     target_ipd = ipd_rad(target_stft_l, target_stft_r, avg_mode=avg_mode)
+#     output_ipd = ipd_rad(output_stft_l, output_stft_r, avg_mode=avg_mode)
 
-    ipd_loss = ((target_ipd - output_ipd).abs())
+#     ipd_loss = ((target_ipd - output_ipd).abs())
 
-    mask = speechMask(target_stft_l,target_stft_r, threshold=20)
+#     mask = speechMask(target_stft_l,target_stft_r, threshold=20)
     
-    masked_ipd_loss = ((ipd_loss * mask).sum(dim=2)).sum(dim=1)/(mask.sum(dim=2)).sum(dim=1)
-    return masked_ipd_loss.mean()
+#     masked_ipd_loss = ((ipd_loss * mask).sum(dim=2)).sum(dim=1)/(mask.sum(dim=2)).sum(dim=1)
+#     return masked_ipd_loss.mean()
+
+def ipd_loss_rads(target_l, target_r, out_l, out_r,
+                  sr=16000, f_max=1500, eps=1e-6):
+    tgt_ipd = torch.angle(target_l + eps) - torch.angle(target_r + eps)
+    out_ipd = torch.angle(out_l + eps) - torch.angle(out_r + eps)
+
+    # wrap to [-π, π]
+    diff = torch.angle(torch.exp(1j * (tgt_ipd - out_ipd))).abs()
+
+    n_fft   = (target_l.size(1) - 1) * 2
+    max_bin = int(f_max / (sr / n_fft))
+
+    # ─── 同時裁剪 diff 與 mask ───
+    mask_energy = torch.maximum(target_l.abs()**2, target_r.abs()**2)
+    peak_db     = 20 * torch.log10(mask_energy.max(dim=2, keepdim=True).values + eps)
+    mask        = (20 * torch.log10(mask_energy + eps) > (peak_db - 20)).float()
+
+    diff  = diff[:, :max_bin + 1, :]
+    mask  = mask[:, :max_bin + 1, :]      # ★ 這行補上
+
+    loss  = (diff * mask).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) + eps)
+    return loss.mean()
+
+
 
 def comp_loss_old(target_stft_l,target_stft_r,output_stft_l, output_stft_r,c=0.3):
     

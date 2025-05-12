@@ -58,6 +58,8 @@ class DCNN(nn.Module):
         # 若 config 有 binaural=True → 乘 2
         self.is_binaural = kwargs.get("binaural", False)
         flatten_size = base_flat * (2 if self.is_binaural else 1)
+        # breakpoint()
+        # print(f"flatten_size: {flatten_size}")
         self.mattn = MultiAttnBlock(
             input_size=flatten_size,  # 512 or 1024
             hidden_size=self.rnn_units,

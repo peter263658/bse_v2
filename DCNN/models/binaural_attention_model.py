@@ -94,7 +94,7 @@ class BinauralAttentionDCNN(DCNN):
        
     #     return out_wav
     def forward(self, inputs):
-    # Process left and right channels through STFT
+        # Process left and right channels through STFT
         cspecs_l = self.stft(inputs[:, 0])
         cspecs_r = self.stft(inputs[:, 1])
         
