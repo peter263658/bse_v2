@@ -49,23 +49,16 @@ model:
   masking_mode: 'E'
   rnn_layers: 2
   rnn_units: 128
-  # win_len: 400         # 25ms at 16kHz
-  # win_inc: 100         # 6.25ms at 16kHz
-  # fft_len: 512
-  win_len: 256         # Changed from 400 to 256
-  win_inc: 100         # Kept at 6.25ms
-  fft_len: 256 
+  win_len: 400         # 25ms at 16kHz
+  win_inc: 100         # 6.25ms at 16kHz
+  fft_len: 512
   win_type: 'hann'
   kernel_size: 5
   # Kernel numbers for encoder-decoder layers as per paper
   kernel_num: [16, 32, 64, 128, 256, 256]
   bidirectional: false
-  # embed_dim: 512       # Embedding dimension for transformer
-  # num_heads: 32        # Number of attention heads as mentioned in paper
-  embed_dim: 256       # Changed from 512 to 256
-  num_heads: 16        # Changed from 32 to 16
-
-
+  embed_dim: 512       # Embedding dimension for transformer
+  num_heads: 32        # Number of attention heads as mentioned in paper
 training:
   accelerator: auto
   batch_size: 32
