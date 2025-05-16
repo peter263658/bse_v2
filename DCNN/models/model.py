@@ -69,6 +69,9 @@ class DCNN(nn.Module):
         )
 
         self.encoder = Encoder(self.kernel_num, kernel_size)
+        self.encoder_l = Encoder(self.kernel_num, kernel_size)
+        self.encoder_r = Encoder(self.kernel_num, kernel_size)
+
         # self._create_rnn(rnn_layers)
         # self.attn = FAL(in_channels=1, out_channels=96, f_length=256)
 
@@ -81,6 +84,8 @@ class DCNN(nn.Module):
         #     num_layers=rnn_layers)
 
         self.decoder = Decoder(self.kernel_num, self.kernel_size)
+        self.decoder_l = Decoder(self.kernel_num, self.kernel_size)
+        self.decoder_r = Decoder(self.kernel_num, self.kernel_size)
 
         # show_model(self)
         # show_params(self)

@@ -5,7 +5,9 @@
 # MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-10/19-39-07/logs/lightning_logs/version_0/checkpoints/epoch=98-step=95832.ckpt" # current best
 # MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-10/19-39-07/logs/lightning_logs/version_0/checkpoints/last.ckpt"
 # MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-11/16-34-17/logs/lightning_logs/version_0/checkpoints/epoch=94-step=91960.ckpt"
-MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-12/15-30-55/logs/lightning_logs/version_0/checkpoints/epoch=89-step=87120.ckpt" 
+# MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-12/15-30-55/logs/lightning_logs/version_0/checkpoints/epoch=89-step=87120.ckpt" 
+# MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-12/15-30-55/logs/lightning_logs/version_0/checkpoints/last.ckpt"
+MODEL_CHECKPOINT="/raid/R12K41024/BCCTN/outputs/2025-05-16/04-19-55/logs/lightning_logs/version_0/checkpoints/epoch=98-step=95832.ckpt"
 VCTK_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset"
 VCTK_CLEAN_DIR="/raid/R12K41024/BCCTN/Dataset/clean_testset"
 TIMIT_NOISY_DIR="/raid/R12K41024/BCCTN/Dataset/noisy_testset_timit"
