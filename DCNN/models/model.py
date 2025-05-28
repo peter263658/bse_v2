@@ -69,23 +69,7 @@ class DCNN(nn.Module):
         )
 
         self.encoder = Encoder(self.kernel_num, kernel_size)
-        self.encoder_l = Encoder(self.kernel_num, kernel_size)
-        self.encoder_r = Encoder(self.kernel_num, kernel_size)
-
-        # self._create_rnn(rnn_layers)
-        # self.attn = FAL(in_channels=1, out_channels=96, f_length=256)
-
-        
-        # self.rnn = RnnBlock(
-        #     # if idx == 0 else self.rnn_units,
-        #     input_size=hidden_dim * self.kernel_num[-1],
-        #     hidden_size=self.rnn_units,
-        #     bidirectional=bidirectional,
-        #     num_layers=rnn_layers)
-
         self.decoder = Decoder(self.kernel_num, self.kernel_size)
-        self.decoder_l = Decoder(self.kernel_num, self.kernel_size)
-        self.decoder_r = Decoder(self.kernel_num, self.kernel_size)
 
         # show_model(self)
         # show_params(self)
@@ -101,21 +85,10 @@ class DCNN(nn.Module):
 
         encoder_out = self.encoder(x)
         x = encoder_out[-1]
-
-        # 2. Apply RNN
         x = self.mattn(x)
-
-        # 3. Apply decoder
         x = self.decoder(x, encoder_out)
-
-        # 4. Apply mask
         out_spec = apply_mask(x[:, 0], cspecs, self.masking_mode)
-
-        # 5. Invert STFT
         out_wav = self.istft(out_spec)
-        # out_wav = torch.squeeze(out_wav, 1)
-        # out_wav = torch.clamp_(out_wav, -1, 1)
-        # breakpoint()
         return out_wav  # out_spec, out_wav
 
     def get_params(self, weight_decay=0.0):
@@ -152,12 +125,12 @@ class Encoder(nn.Module):
                     torch_complex.ComplexConv2d(
                         self.kernel_num[idx]//2,
                         self.kernel_num[idx + 1]//2,
-                        # kernel_size=(self.kernel_size, 2),
-                        # stride=(2, 1),
-                        # padding=(2, 1)
-                        kernel_size=(self.kernel_size, 1),
+                        kernel_size=(self.kernel_size, 2),
                         stride=(2, 1),
-                        padding=(2, 0)
+                        padding=(2, 1)
+                        # kernel_size=(self.kernel_size, 1),
+                        # stride=(2, 1),
+                        # padding=(2, 0)
                     ),
                     torch_complex.NaiveComplexBatchNorm2d(
                         self.kernel_num[idx + 1]//2),
@@ -189,12 +162,12 @@ class Decoder(nn.Module):
                 torch_complex.ComplexConvTranspose2d(
                     self.kernel_num[idx],  # * 2,
                     self.kernel_num[idx - 1]//2,
-                    # kernel_size=(self.kernel_size, 2),
-                    # stride=(2, 1),
-                    # padding=(2, 1),
-                    kernel_size=(self.kernel_size, 1),
+                    kernel_size=(self.kernel_size, 2),
                     stride=(2, 1),
-                    padding=(2, 0),
+                    padding=(2, 1),
+                    # kernel_size=(self.kernel_size, 1),
+                    # stride=(2, 1),
+                    # padding=(2, 0),
                     output_padding=(1, 0)
                 ),
             ]

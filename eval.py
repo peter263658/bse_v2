@@ -877,7 +877,8 @@ def evaluate_at_paper_snrs(model_checkpoint, vctk_test_dir, vctk_clean_dir,
         Dictionary of results by SNR
     """
     # SNR levels used in the paper
-    paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
+    # paper_snrs = [-6, -3, 0, 3, 6, 9, 12, 15]
+    paper_snrs = [-10, -5, 0, 5, 10]
     
     # Process VCTK dataset
     vctk_results_by_snr = {}

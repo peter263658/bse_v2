@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class Stft(nn.Module):
-    def __init__(self, n_dft=1024, hop_size=512, win_length=None,
+    def __init__(self, n_dft=512, hop_size=256, win_length=None,
                  onesided=True, is_complex=True):
 
         super().__init__()

@@ -133,8 +133,8 @@ class BinauralAttentionDCNN(DCNN):
         cspecs_r = self.stft(inputs[:, 1])
         
         # Pass through encoders
-        encoder_out_l = self.encoder_l(cspecs_l.unsqueeze(1))
-        encoder_out_r = self.encoder_r(cspecs_r.unsqueeze(1))
+        encoder_out_l = self.encoder(cspecs_l.unsqueeze(1))
+        encoder_out_r = self.encoder(cspecs_r.unsqueeze(1))
         
         # Concatenate encoder outputs and send through attention
         enc_combined = torch.cat([encoder_out_l[-1], encoder_out_r[-1]], dim=1)
@@ -144,8 +144,8 @@ class BinauralAttentionDCNN(DCNN):
         attn_l, attn_r = attention_out.chunk(2, dim=1)
         
         # Decode both channels
-        x_l = self.decoder_l(attn_l, encoder_out_l)
-        x_r = self.decoder_r(attn_r, encoder_out_r)
+        x_l = self.decoder(attn_l, encoder_out_l)
+        x_r = self.decoder(attn_r, encoder_out_r)
         
         # Apply masks
         out_spec_l = apply_mask(x_l[:, 0], cspecs_l, self.masking_mode)

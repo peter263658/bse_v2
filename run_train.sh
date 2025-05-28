@@ -3,7 +3,7 @@
 # Set paths and environment variables
 export PYTHONPATH="$PYTHONPATH:$(pwd)"
 export HYDRA_FULL_ERROR=1 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # Default configuration file path
 CONFIG_PATH="./config/config.yaml"

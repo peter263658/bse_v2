@@ -25,12 +25,12 @@
 #   strategy: ddp_spawn
 #   train_checkpoint_path: null
 dataset:
-  noisy_test_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_testset/snr_0dB
-  noisy_training_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_trainset
-  noisy_validation_dataset_dir: /raid/R12K41024/BCCTN/Dataset/noisy_valset
-  target_test_dataset_dir: /raid/R12K41024/BCCTN/Dataset/clean_testset
-  target_training_dataset_dir: /raid/R12K41024/BCCTN/Dataset/clean_trainset
-  target_validation_dataset_dir: /raid/R12K41024/BCCTN/Dataset/clean_valset
+  noisy_test_dataset_dir: /raid/R12K41024/LBCCN/Dataset/noisy_testset/
+  noisy_training_dataset_dir: /raid/R12K41024/LBCCN/Dataset/noisy_trainset
+  noisy_validation_dataset_dir: /raid/R12K41024/LBCCN/Dataset/noisy_valset
+  target_test_dataset_dir: /raid/R12K41024/LBCCN/Dataset/clean_testset
+  target_training_dataset_dir: /raid/R12K41024/LBCCN/Dataset/clean_trainset
+  target_validation_dataset_dir: /raid/R12K41024/LBCCN/Dataset/clean_valset
 defaults:
 - model
 - training
